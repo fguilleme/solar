@@ -5,6 +5,7 @@
 #   ./test/run.sh selftest     only the full self-test
 #   ./test/run.sh labels       only the label decluttering test
 #   ./test/run.sh shots        write test/shot-true.png and test/shot-tilt.png
+#   ./test/run.sh docs         regenerate docs/*.png (the images in README.md)
 #
 # Scratch copies (index.html + injected harness) are generated into test/build/.
 # index.html itself is never modified.
@@ -90,18 +91,30 @@ sys.exit(1 if bad else 0)
 PY
 }
 
-shot() {  # $1 = output png  $2 = tilt clicks  $3 = polar angle  $4 = distance
-  local profile png="$build/$1.png"
+shot() {  # $1 = name  $2 = tilt clicks  $3 = polar angle  $4 = distance  $5 = out dir
+  local profile png="$build/$1.png" out="$5/$1.png" tries=0
   build_variant view_block.js "$build/view-$1.html"
-  profile="$(mktemp -d /tmp/orrery-shot.XXXXXX)"
-  timeout "${SHOT_TIMEOUT:-120}" "$chrome_bin" \
-    --headless=new --no-sandbox --disable-gpu \
-    --use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader \
-    --user-data-dir="$profile" --no-first-run --disable-extensions \
-    --window-size="${SHOT_SIZE:-480,300}" --virtual-time-budget="${SHOT_BUDGET:-2400}" \
-    --screenshot="$png" "file://$build/view-$1.html#$2|$3|$4" >/dev/null 2>&1 || true
-  rm -rf "$profile"
-  if [ -s "$png" ]; then cp "$png" "$testdir/$1.png"; echo "  wrote test/$1.png ($(stat -c%s "$png") bytes)"; else echo "  screenshot $1 failed (headless capture timed out — try a smaller SHOT_SIZE)"; fi
+  rm -f "$png"          # never report a stale capture as a fresh one
+  while [ "$tries" -lt "${SHOT_TRIES:-3}" ]; do
+    tries=$((tries + 1))
+    profile="$(mktemp -d /tmp/orrery-shot.XXXXXX)"
+    timeout "${SHOT_TIMEOUT:-120}" "$chrome_bin" \
+      --headless=new --no-sandbox --disable-gpu \
+      --use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader \
+      --user-data-dir="$profile" --no-first-run --disable-extensions \
+      --window-size="${SHOT_SIZE:-480,300}" --virtual-time-budget="${SHOT_BUDGET:-2400}" \
+      --screenshot="$png" "file://$build/view-$1.html#$2|$3|$4" >/dev/null 2>&1 || true
+    rm -rf "$profile"
+    [ -s "$png" ] && break
+    rm -f "$png"
+  done
+  if [ -s "$png" ]; then
+    mkdir -p "$5"; cp "$png" "$out"
+    dims=$(python3 -c "import struct,sys;d=open(sys.argv[1],'rb').read();print('%dx%d' % struct.unpack('>II',d[16:24]))" "$png")
+    echo "  wrote ${out#"$root"/} $dims"
+  else
+    echo "  screenshot $1 failed after $tries tries (headless capture stalls — try a smaller SHOT_SIZE or BUDGET)"; return 1
+  fi
 }
 
 rc=0
@@ -123,9 +136,17 @@ fi
 
 if [ "$mode" = "shots" ]; then
   echo "== screenshots (${SHOT_SIZE:-480,300}) =="
-  shot shot-true 0 0.62 300
-  shot shot-tilt 2 0.62 300
+  shot shot-true 0 0.62 300 "$testdir" || rc=1
+  shot shot-tilt 2 0.62 300 "$testdir" || rc=1
   echo "  (best effort: SwiftShader frame capture is slow; see README)"
+fi
+
+if [ "$mode" = "docs" ]; then
+  # Regenerate the two images embedded in README.md (docs/).
+  export SHOT_SIZE="${SHOT_SIZE:-1280,800}" SHOT_BUDGET="${SHOT_BUDGET:-1600}" SHOT_TIMEOUT="${SHOT_TIMEOUT:-180}"
+  echo "== README screenshots ($SHOT_SIZE) =="
+  shot shot-orbits 0 0.62 300 "$root/docs" || rc=1
+  shot shot-tilt 2 0.62 300 "$root/docs" || rc=1
 fi
 
 exit $rc

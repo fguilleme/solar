@@ -9,6 +9,25 @@ Open it and you get the Sun, all eight planets on their real orbits, an asteroid
 
 ---
 
+## What it looks like
+
+![The eight planets on their J2000 orbits with the asteroid belt and the ecliptic grid, seen from above](docs/shot-orbits.png)
+
+*Camera 300 units out, 35° above the ecliptic, inclinations at their **true** size: every orbit
+is a shallow ring around the reference plane, and the ecliptic grid is what gives them somewhere
+to lean.*
+
+![The same view with the tilt viewer at ×12, orbital planes fanned apart](docs/shot-tilt.png)
+
+*Same camera, **Tilt ×12**: the same eight orbits with each inclination multiplied for viewing, so
+the planes fan apart instead of overlapping. Only the drawing is exaggerated — nodes,
+eccentricities, periods and positions are untouched.*
+
+Both images are produced by `./test/run.sh docs` in headless Chrome, so they stay in step with
+the code.
+
+---
+
 ## Run it
 
 ```bash
@@ -182,6 +201,7 @@ survive the compression; absolute sizes do not. The on-screen footnote says so.
 ./test/run.sh selftest   # 118 assertions from 66 check sites
 ./test/run.sh labels     # label decluttering across 8 camera views
 ./test/run.sh shots      # best-effort headless screenshots → test/shot-true.png, test/shot-tilt.png
+./test/run.sh docs       # regenerate docs/*.png — the two images at the top of this README
 node test/orbit-report.mjs
 ```
 
@@ -241,12 +261,16 @@ in time, so lower `BUDGET` before raising `SIZE`. Everything is tunable:
 ```bash
 SIZE=600,380 BUDGET=5000 ./test/run.sh selftest     # test viewport / virtual-time budget
 SHOT_SIZE=480,300 SHOT_BUDGET=2400 ./test/run.sh shots
+SHOT_TRIES=6 ./test/run.sh docs                     # retry a stalled capture more often
 CHROME=chromium ./test/run.sh all
 ```
 
-On this machine `--dump-dom` is reliable at 500×320 and screenshots only complete at or below
-480×300 (700×440 stalls); a real GPU should let you raise both. `run.sh` exits non-zero if any
-assertion fails.
+On this machine `--dump-dom` is reliable at 500×320, and screenshots completed at 480×300 and at
+1280×800 (short budgets) but stalled at 960×600 and 700×440 — the failure is flaky, not a clean
+size limit. A real GPU should raise both. `shot()` deletes the previous PNG before capturing and
+retries `SHOT_TRIES` times (3), so it can never report a stale capture as a fresh one; a view that
+still fails prints `failed after N tries` and makes the run exit non-zero. `run.sh` exits non-zero
+if any assertion fails.
 
 Files:
 
@@ -257,7 +281,7 @@ Files:
 | `test/labeltest.js` | fast label-only harness (no pixel reads) |
 | `test/view_block.js` | camera/tilt pose helper used for screenshots (`#tiltClicks|polar|dist`) |
 | `test/orbit-report.mjs` | standalone Node verification of the orbital convention |
-| `test/run.sh` | runner for all of the above |
+| `test/run.sh` | runner for all of the above (`selftest` / `labels` / `views` / `shots` / `docs` / `all`) |
 | `test/build/` | generated scratch copies and DOM dumps — safe to delete |
 
 ---
@@ -267,16 +291,19 @@ Files:
 ```
 index.html                the whole app — markup, CSS, and the module
 README.md
-test/run.sh               test driver (selftest / labels / views / shots / all)
+docs/shot-orbits.png      the two screenshots embedded at the top of this README
+docs/shot-tilt.png
+test/run.sh               test driver (selftest / labels / views / shots / docs / all)
 test/selftest.js          physics, picking, camera, UI assertions
 test/labeltest.js         label overlap and placement at five zooms
 test/view_block.js        pixel checks and screenshot injection
 test/orbit-report.mjs     standalone Kepler convention cross-check (no browser)
 test/build/               scratch copies with harnesses injected (regenerated each run)
-test/shot-*.png           screenshots, if you run ./test/run.sh shots
+test/shot-*.png           scratch screenshots (gitignored), if you run ./test/run.sh shots
 ```
 
-`test/build/` is generated output; deleting it is always safe.
+`test/build/` and `test/*.png` are generated output — deleting them is always safe. `docs/` is
+committed and only changes when you run `./test/run.sh docs` on purpose.
 
 ## Tweaking
 
