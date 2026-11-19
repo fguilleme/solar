@@ -556,6 +556,8 @@ const EARTH_RADIUS_KM = 6371;
 /* Display scaling: real values compressed so inner worlds stay visible. */
 const auToUnit = au => 18 * Math.pow(au, 0.55);
 const kmToUnit = km => 1.25 * Math.pow(km / EARTH_RADIUS_KM, 0.42);
+/* Asteroids use that same compression rule as the planets — no special boost. */
+const kmToUnitRaw = kmToUnit;
 const SUN_RADIUS = 4.6;
 
 /* Real J2000 orbital elements (JPL approximate elements):
@@ -1056,45 +1058,466 @@ const eclipticGrid = (() => {
   return grid;
 })();
 
-/* ---------------------------- asteroid belt ------------------------------ */
-const BELT_COUNT = 1700;
-const belt = new Float32Array(BELT_COUNT * 3);
+/* --------------------------- asteroid belt -------------------------------
+   The belt is a population, not a texture. 4,600 rocks each ride their own
+   Keplerian orbit — their own a, e, i, node, argument of perihelion and phase
+   — integrated from the real date with the same Ry(Ω)·Rx(i) transform the
+   planets use. The distribution has real structure:
+
+   · Kirkwood gaps. An orbit at a = a_Jupiter·(j/(j+q))^(2/3) returns to the
+     same longitude every j+q revolutions, so Jupiter tugs it in step until its
+     eccentricity carries it across a planet's path. 4:1, 3:1, 5:2, 2:1 and 3:2
+     are cut out of the population; so is the ν6 secular resonance at ~2.11 AU,
+     where the argument of perihelion circulates with Saturn and eccentricity
+     grows without any resonance at all — that is the belt's inner edge.
+   · Rocks near those gaps are pumped: higher eccentricity, higher inclination.
+   · Composition drifts outward — bright silicate (S) inside ~2.6 AU, dark
+     carbonaceous (C) through the middle, very dark and reddish (D) far out.
+
+   Detail is layered by what the camera can resolve, so a wide view still reads
+   as a belt and a close view shows the rocks themselves:
+     · every rock is a lit point, sized by its own diameter and tinted by class;
+     · a rock that subtends more than ~1.4 px is drawn instead as an instanced
+       faceted body with its own tumble, proportions and albedo texture;
+     · a rock drawn as a body is switched off in the point layer that frame,
+       so nothing is counted twice.
+   ------------------------------------------------------------------------- */
+const BELT_COUNT = 4600;
+const BELT_AU_MIN = 2.06, BELT_AU_MAX = 4.06;
+const ROCK_GAIN = 1.8;                        // rocks ride the planets' compressed radius law
+const JD_J2000 = 2451545.0, DAYS_PER_YEAR = 365.2569898;
+const FACET_PX = 1.35, CHUNK_PX = 5.5, ROCK_MAX = 1500;
+
+const KIRKWOOD = [
+  { name: '4:1', a: 5.203363 * Math.pow(1 / 4, 2 / 3), width: 0.035, depth: 0.94, pump: 10, ecc: 0.10 },
+  { name: '3:1', a: 5.203363 * Math.pow(1 / 3, 2 / 3), width: 0.045, depth: 0.96, pump: 13, ecc: 0.13 },
+  { name: '5:2', a: 5.203363 * Math.pow(2 / 5, 2 / 3), width: 0.040, depth: 0.86, pump: 11, ecc: 0.10 },
+  { name: '2:1', a: 5.203363 * Math.pow(1 / 2, 2 / 3), width: 0.045, depth: 0.82, pump: 9,  ecc: 0.08 },
+  { name: '3:2', a: 5.203363 * Math.pow(2 / 3, 2 / 3), width: 0.070, depth: 0.74, pump: 6,  ecc: 0.06 },
+  { name: 'nu6', a: 2.11,                             width: 0.085, depth: 0.92, pump: 3,  ecc: 0.17 }
+];
+
+function beltGapFactor(au, g) {
+  const x = (au - g.a) / g.width;
+  return Math.exp(-x * x);
+}
+
+function beltDensity(au) {
+  const t = (au - BELT_AU_MIN) / (BELT_AU_MAX - BELT_AU_MIN);
+  let d = Math.sin(Math.PI * (0.10 + 0.92 * t)) * (1 - 0.28 * t);
+  for (const g of KIRKWOOD) d *= 1 - g.depth * beltGapFactor(au, g);
+  return Math.max(d, 0);
+}
+
+let BELT_PEAK = 1e-6;
+for (let k = 0; k <= 600; k++) {
+  BELT_PEAK = Math.max(BELT_PEAK, beltDensity(BELT_AU_MIN + (k / 600) * (BELT_AU_MAX - BELT_AU_MIN)));
+}
+
+/* albedo classes: 0 = C-type (dark carbon, most of the belt), 1 = S-type
+   (bright silicate, inner belt), 2 = D-type (very dark, reddish, outer) */
+function beltClass(rand, au) {
+  const r = rand();
+  if (au < 2.62) return r < 0.40 ? 0 : r < 0.92 ? 1 : 2;      // silicate inner belt
+  if (au < 3.30) return r < 0.70 ? 0 : r < 0.90 ? 1 : 2;      // carbonaceous middle
+  return r < 0.74 ? 0 : r < 0.84 ? 1 : 2;                     // primitive outer belt
+}
+const BELT_TINT = [[0.44, 0.41, 0.38], [0.74, 0.66, 0.55], [0.34, 0.29, 0.26]];
+const BELT_GAIN = [0.30, 0.34, 0.24];   // additive brightness of the point layer per class
+
+const beltRand = mulberry32(4242);
+const beltPos = new Float32Array(BELT_COUNT * 3);
+const beltTint = new Float32Array(BELT_COUNT * 3);
+const beltTintHome = new Float32Array(BELT_COUNT * 3);
+const beltDot = new Float32Array(BELT_COUNT);
 const beltMeta = [];
-{
-  const rand = mulberry32(4242);
-  for (let i = 0; i < BELT_COUNT; i++) {
-    const au = 2.06 + rand() * 1.35;
-    const radius = auToUnit(au) * (0.97 + rand() * 0.06);
-    const inc = deg2rad(Math.pow(rand(), 1.7) * 9.6);   // main belt: mostly under 4°, few over 9°
-    const node = rand() * TAU;
-    beltMeta.push({
-      radius, m0: rand() * TAU, period: Math.pow(au, 1.5) * 365.25, inc,
-      ci: Math.cos(inc), si: Math.sin(inc), cn: Math.cos(node), sn: Math.sin(node)
-    });
+
+function sampleBeltAU(rand) {
+  for (let k = 0; k < 64; k++) {
+    const au = BELT_AU_MIN + rand() * (BELT_AU_MAX - BELT_AU_MIN);
+    if (rand() * BELT_PEAK <= beltDensity(au)) return au;
   }
+  return BELT_AU_MIN + rand() * (BELT_AU_MAX - BELT_AU_MIN);
+}
+
+for (let i = 0; i < BELT_COUNT; i++) {
+  const au = sampleBeltAU(beltRand);
+  let ecc = 0.010 + Math.pow(beltRand(), 1.35) * 0.19, incDeg = Math.pow(beltRand(), 1.70) * 11.5;
+  for (const g of KIRKWOOD) {
+    const f = beltGapFactor(au, g);
+    ecc += g.ecc * f;                    // resonant rocks are the eccentric ones
+    incDeg += g.pump * f;                // ... and the tilted ones
+  }
+  ecc = Math.min(ecc, 0.3);
+  incDeg = Math.min(incDeg, 24);
+
+  const inc = deg2rad(incDeg), node = beltRand() * TAU, argp = beltRand() * TAU;
+  const km = 8 + Math.pow(beltRand(), 3.2) * 250;      // a few big rocks, a long tail of rubble
+  const cls = beltClass(beltRand, au);
+  const tint = BELT_TINT[cls], gain = BELT_GAIN[cls];
+  const shade = 0.82 + beltRand() * 0.36;
+  const warm = (beltRand() - 0.5) * 0.14;
+
+  beltTintHome[i * 3] = tint[0] * gain * shade * (1 + warm);
+  beltTintHome[i * 3 + 1] = tint[1] * gain * shade * (1 + warm * 0.4);
+  beltTintHome[i * 3 + 2] = tint[2] * gain * shade * (1 - warm);
+  for (let c = 0; c < 3; c++) beltTint[i * 3 + c] = beltTintHome[i * 3 + c];
+
+  beltDot[i] = 0.32 + 1.05 * Math.pow(km / 258, 0.42);
+
+  /* tumble axis, random but unit length; spin is radians per simulated day,
+     which is why the rocks turn faster when time runs faster */
+  let ax = beltRand() * 2 - 1, ay = beltRand() * 2 - 1, az = beltRand() * 2 - 1;
+  const an = Math.hypot(ax, ay, az) || 1;
+  ax /= an; ay /= an; az /= an;
+
+  beltMeta.push({
+    au, km, cls, shade, radius: auToUnit(au), ecc, bfac: Math.sqrt(1 - ecc * ecc),
+    m0: beltRand() * TAU, period: DAYS_PER_YEAR * Math.pow(au, 1.5),
+    inc: incDeg, incRad: inc, ci: Math.cos(inc), si: Math.sin(inc),
+    cn: Math.cos(node), sn: Math.sin(node),
+    cw: Math.cos(argp), sw: Math.sin(argp),
+    rU: kmToUnitRaw(km / 2) * ROCK_GAIN,
+    ax, ay, az,
+    spin: (4 + beltRand() * 13) * (beltRand() < 0.5 ? -1 : 1),
+    phase: beltRand() * TAU, squash: 0.62 + beltRand() * 0.4,
+    shape: cls, drawn: 0
+  });
 }
 const beltGeo = new THREE.BufferGeometry();
-beltGeo.setAttribute('position', new THREE.BufferAttribute(belt, 3));
-const beltMat = new THREE.PointsMaterial({ color: 0xb9a48a, size: 0.9, sizeAttenuation: true, transparent: true, opacity: 0.65, depthWrite: false });
+beltGeo.setAttribute('position', new THREE.BufferAttribute(beltPos, 3));
+beltGeo.setAttribute('aColor', new THREE.BufferAttribute(beltTint, 3));
+beltGeo.setAttribute('aDot', new THREE.BufferAttribute(beltDot, 1));
+
+/* own point shader: three's PointsMaterial gives every point the same size, and
+   a belt whose rubble all measures the same is a belt without detail. */
+const beltMat = new THREE.ShaderMaterial({
+  uniforms: { uScale: { value: 200 } },
+  vertexShader: `
+    attribute float aDot; attribute vec3 aColor; uniform float uScale;
+    varying vec3 vColor;
+    void main(){
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mv;
+      gl_PointSize = clamp(aDot * uScale / max(1.0, -mv.z), 1.0, 14.0);
+      vColor = aColor;
+    }`,
+  fragmentShader: `
+    varying vec3 vColor;
+    void main(){
+      float d = length(gl_PointCoord - 0.5);
+      float a = smoothstep(0.5, 0.14, d);
+      if (a < 0.01) discard;
+      gl_FragColor = vec4(vColor * a, 1.0);
+    }`,
+  transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+});
 const beltPoints = new THREE.Points(beltGeo, beltMat);
+beltPoints.frustumCulled = false;
+beltPoints.renderOrder = 3;
 scene.add(beltPoints);
+
+/* faceted rubble: three noise-deformed bodies, one per albedo class, so the
+   belt is made of shapes rather than of copies of one shape */
+function rockShape(variant) {
+  const g = new THREE.IcosahedronGeometry(1, 1);
+  const p = g.attributes.position;
+  const n = makeNoise(733 + variant * 137);
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const d = 0.72 + n(x * 1.5 + 3, y * 1.5 + 1, 3, 0.6, 3) * 0.66 + n(z * 2.9 + variant, x * 2.9, 2, 0.5, 5) * 0.24;
+    p.setXYZ(i, x * d, y * d * (1 - 0.09 * variant), z * d);
+  }
+  g.computeVertexNormals();     // non-indexed -> flat facets
+  return g;
+}
+
+const ROCK_SURFACE = [
+  [[0, rgb(46, 44, 42)], [0.55, rgb(78, 75, 71)], [1, rgb(114, 111, 105)]],   // C
+  [[0, rgb(78, 71, 62)], [0.5, rgb(132, 121, 105)], [1, rgb(186, 175, 157)]], // S
+  [[0, rgb(36, 32, 29)], [0.55, rgb(57, 49, 42)], [1, rgb(86, 73, 60)]]       // D
+];
+const ROCK_TEX = ROCK_SURFACE.map((stops, cls) => toTexture(paintRock({
+  seed: 917 + cls * 53, w: 384, stops, mottle: 0.52, broad: 0.36, craters: 190 - cls * 30, boulders: 34
+}), 1));
+const ROCK_MAT = ROCK_TEX.map(tex => new THREE.MeshStandardMaterial({
+  map: tex, bumpMap: tex, bumpScale: 0.09, roughness: 0.96, metalness: 0.02,
+  emissive: new THREE.Color(0x14161c), emissiveIntensity: 0.4
+}));
+
+const rockLayer = [0, 1, 2].map(cls => {
+  const m = new THREE.InstancedMesh(rockShape(cls), ROCK_MAT[cls], ROCK_MAX);
+  m.setColorAt(0, new THREE.Color(1, 1, 1));
+  m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  m.frustumCulled = false;
+  m.count = 0;
+  scene.add(m);
+  return m;
+});
+
+const _rm = new THREE.Matrix4(), _rq = new THREE.Quaternion();
+const _rp = new THREE.Vector3(), _rs = new THREE.Vector3(), _ra = new THREE.Vector3();
+const _rc = new THREE.Color();
+let beltTiltK = -1, beltDrawnTotal = 0;
 
 function updateBelt(days) {
   const k = Math.min(tiltScale, 4);
+  if (k !== beltTiltK) {
+    beltTiltK = k;
+    for (const m of beltMeta) { const i = m.incRad * k; m.ci = Math.cos(i); m.si = Math.sin(i); }
+  }
+
+  const pxPerUnit = (renderer.domElement.height * 0.5) / Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5);
+  beltMat.uniforms.uScale.value = renderer.domElement.height * 0.5;
+  const cx = camera.position.x, cy = camera.position.y, cz = camera.position.z;
+  const counts = [0, 0, 0];
+  let tintChanged = false;
+  beltDrawnTotal = 0;
+
   for (let i = 0; i < BELT_COUNT; i++) {
     const m = beltMeta[i];
-    const th = m.m0 + TAU * (((days % m.period) + m.period) / m.period);
-    const x = Math.cos(th) * m.radius, z = -Math.sin(th) * m.radius;
-    const yTilt = -z * m.si * k, zTilt = z * m.ci;
-    belt[i * 3] = x * m.cn + zTilt * m.sn;
-    belt[i * 3 + 1] = yTilt;
-    belt[i * 3 + 2] = -x * m.sn + zTilt * m.cn;
+    const M = m.m0 + TAU * (days / m.period);
+    let E = M + m.ecc * Math.sin(M);                       // good to ~1e-5 rad at e <= 0.3
+    for (let it = 0; it < 2; it++) E -= (E - m.ecc * Math.sin(E) - M) / (1 - m.ecc * Math.cos(E));
+
+    /* same construction as the planets: ellipse in its own plane, argument of
+       perihelion about y, then Ry(node)·Rx(inclination) into the ecliptic frame */
+    const x0 = m.radius * (Math.cos(E) - m.ecc), z0 = -m.radius * m.bfac * Math.sin(E);
+    const xp = x0 * m.cw + z0 * m.sw, zp = -x0 * m.sw + z0 * m.cw;
+    const x = xp * m.cn + zp * m.ci * m.sn;
+    const y = -zp * m.si;
+    const z = -xp * m.sn + zp * m.ci * m.cn;
+    beltPos[i * 3] = x; beltPos[i * 3 + 1] = y; beltPos[i * 3 + 2] = z;
+
+    const dx = x - cx, dy = y - cy, dz = z - cz;
+    const screenR = (m.rU * pxPerUnit) / Math.max(1, Math.sqrt(dx * dx + dy * dy + dz * dz));
+    const lit = screenR > FACET_PX && counts[m.cls] < ROCK_MAX;
+
+    if (lit !== (m.drawn === 1)) {
+      m.drawn = lit ? 1 : 0;
+      tintChanged = true;
+      if (lit) beltTint[i * 3] = beltTint[i * 3 + 1] = beltTint[i * 3 + 2] = 0;   // drawn as a body
+      else for (let c = 0; c < 3; c++) beltTint[i * 3 + c] = beltTintHome[i * 3 + c];
+    }
+    if (!lit) continue;
+
+    counts[m.cls]++; beltDrawnTotal++;
+    _ra.set(m.ax, m.ay, m.az);
+    _rq.setFromAxisAngle(_ra, m.phase + m.spin * days);
+    _rp.set(x, y, z);
+    _rs.set(m.rU, m.rU * m.squash, m.rU * (0.78 + 0.34 * m.squash));
+    _rm.compose(_rp, _rq, _rs);
+    rockLayer[m.cls].setMatrixAt(counts[m.cls], _rm);
+    const t = BELT_TINT[m.cls];
+    _rc.setRGB(t[0] * m.shade, t[1] * m.shade, t[2] * m.shade);
+    rockLayer[m.cls].setColorAt(counts[m.cls], _rc);
   }
+
+  for (let cls = 0; cls < 3; cls++) {
+    const L = rockLayer[cls];
+    L.count = counts[cls];
+    L.instanceMatrix.needsUpdate = true;
+    if (L.instanceColor) L.instanceColor.needsUpdate = true;
+  }
+
   beltGeo.attributes.position.needsUpdate = true;
+  if (tintChanged) beltGeo.attributes.aColor.needsUpdate = true;
+}
+/* --------------------- rocky surfaces and the named belt bodies ----------
+   Four asteroids are real worlds here, not members of the swarm: Ceres, Vesta,
+   Pallas and Hygiea. Their orbits are live JPL Small-Body Database solutions,
+   propagated from each body's own perihelion passage, and each has its own
+   shape, surface and data card. */
+function paintRock(cfg) {
+  const W = cfg.w || 512, H = W / 2;
+  const canvas = newCanvas(W, H);
+  const ctx = canvas.getContext('2d');
+  const fbm = makeNoise(cfg.seed);
+  const img = ctx.createImageData(W, H), px = img.data;
+
+  for (let py = 0; py < H; py++) {
+    const v = py / (H - 1);
+    for (let pxi = 0; pxi < W; pxi++) {
+      const u = pxi / W;
+      const mottle = (fbm(u * 7.0, v * 14.0, 5, 0.55, 5) - 0.5) * cfg.mottle;
+      const broad = (fbm(u * 2.1 + 7.7, v * 4.2 + 2.3, 3, 0.6, 3) - 0.5) * cfg.broad;
+      const grooves = (fbm(u * 20, v * 40, 2, 0.5, 9) - 0.5) * 0.09;      // regolith scarps
+      const col = ramp(cfg.stops, clamp(0.5 + mottle + broad + grooves, 0, 1));
+      const i = (py * W + pxi) * 4;
+      px[i] = clamp(col[0], 0, 255); px[i + 1] = clamp(col[1], 0, 255); px[i + 2] = clamp(col[2], 0, 255); px[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+
+  const rand = mulberry32(cfg.seed + 31);
+  /* impact craters: raised rim, shadowed floor, occasional central peak */
+  for (let k = 0; k < cfg.craters; k++) {
+    const cx = rand() * W, cy = rand() * H;
+    const r = 1.5 + Math.pow(rand(), 2.6) * W * 0.05;
+    const g = ctx.createRadialGradient(cx, cy, r * 0.15, cx, cy, r);
+    const fresh = rand() < 0.35;
+    g.addColorStop(0, fresh ? 'rgba(255,252,245,.20)' : 'rgba(0,0,0,.30)');
+    g.addColorStop(0.45, fresh ? 'rgba(0,0,0,.14)' : 'rgba(0,0,0,.20)');
+    g.addColorStop(0.78, 'rgba(255,255,255,.10)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.fill();
+    if (r > 8 && rand() < 0.4) {                       // central peak
+      ctx.fillStyle = 'rgba(255,255,255,.12)';
+      ctx.beginPath(); ctx.arc(cx, cy, r * 0.22, 0, TAU); ctx.fill();
+    }
+  }
+  for (let k = 0; k < (cfg.boulders || 0); k++) {      // boulder fields, brighter blocks
+    const cx = rand() * W, cy = rand() * H, r = 1 + rand() * 2.6;
+    ctx.fillStyle = `rgba(255,250,240,${0.05 + rand() * 0.09})`;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.fill();
+  }
+  if (cfg.spots) {                                      // ceresian faculae: salt left by brine
+    const sx = 0.62 * W, sy = 0.30 * H;
+    for (let k = 0; k < cfg.spots; k++) {
+      const cx = sx + (rand() - 0.5) * W * 0.16, cy = sy + (rand() - 0.5) * H * 0.22;
+      const r = 1.5 + Math.pow(rand(), 2.4) * W * 0.02;
+      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 2.4);
+      g.addColorStop(0, 'rgba(248,252,255,.85)');
+      g.addColorStop(0.4, 'rgba(226,236,244,.35)');
+      g.addColorStop(1, 'rgba(200,215,230,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(cx, cy, r * 2.4, 0, TAU); ctx.fill();
+    }
+  }
+  return canvas;
 }
 
+function rockBody(def, rU) {
+  const g = new THREE.SphereGeometry(1, 72, 48);
+  const p = g.attributes.position;
+  const n = makeNoise(def.seed);
+  const basin = def.basin;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    let d = 1 + (n(x * 1.8 + 2, y * 1.8 + 5, 4, 0.55, 4) - 0.5) * def.lumpy
+            + (n(z * 3.6, x * 3.6 + 1.2, 2, 0.5, 6) - 0.5) * def.lumpy * 0.55;
+    if (basin) {                                        // a hemisphere-scale impact basin
+      const dot = x * basin.dir[0] + y * basin.dir[1] + z * basin.dir[2];
+      const t = clamp((dot - basin.cos) / (1 - basin.cos), 0, 1);
+      d *= 1 - basin.depth * t * t * (3 - 2 * t);
+      if (t > 0.55) d += (t - 0.55) * basin.rim;       // rebounded rim
+    }
+    p.setXYZ(i, x * d * def.shape[0], y * d * def.shape[1], z * d * def.shape[2]);
+  }
+  g.computeVertexNormals();
+  g.scale(rU, rU, rU);
+  return g;
+}
+
+const ROCKS = [
+  {
+    name: 'Ceres', type: 'Dwarf planet · inner main belt', hex: '#a99a86',
+    au: 2.77, ecc: 0.0797, inc: 10.6, node: 80.2, peri: 73.3, tpJD: 2461599.841,
+    radiusKm: 470, shape: [1.03, 1.00, 0.95], lumpy: 0.075, tilt: 4.0, rotHours: 9.074,
+    temp: '≈ −110 °C', moons: 0, seed: 501,
+    surface: { seed: 501, w: 640, stops: [[0, rgb(54, 51, 49)], [0.5, rgb(93, 89, 85)], [1, rgb(146, 143, 137)]], mottle: 0.4, broad: 0.28, craters: 240, boulders: 30, spots: 30 },
+    fact: 'The most massive object in the belt and the only dwarf planet in the inner solar system. Dawn watched carbonate brine well up inside Occator crater: the brightest spots on Ceres are the salt it left behind.'
+  },
+  {
+    name: 'Vesta', type: 'Protoplanet · inner main belt', hex: '#c6bda9',
+    au: 2.36, ecc: 0.0902, inc: 7.14, node: 104.0, peri: 151.0, tpJD: 2460901.587,
+    radiusKm: 263, shape: [1.02, 1.00, 0.93], lumpy: 0.05, tilt: 29.0, rotHours: 5.342,
+    temp: '≈ −115 °C', moons: 0, seed: 604,
+    basin: { dir: [0, -1, 0], cos: Math.cos(0.72), depth: 0.2, rim: 0.16 },
+    surface: { seed: 604, w: 640, stops: [[0, rgb(96, 92, 88)], [0.5, rgb(150, 145, 138)], [1, rgb(206, 201, 192)]], mottle: 0.34, broad: 0.22, craters: 300, boulders: 26 },
+    fact: 'A protoplanet that almost became a planet, differentiated into crust, mantle and core. Its south-polar basin is 500 km across on a body 525 km wide, and the debris it blasted off reaches Earth as HED meteorites.'
+  },
+  {
+    name: 'Pallas', type: 'Main belt · high inclination', hex: '#8f8f96',
+    au: 2.77, ecc: 0.231, inc: 34.9, node: 173.0, peri: 311.0, tpJD: 2461695.031,
+    radiusKm: 256, shape: [1.00, 0.98, 0.96], lumpy: 0.085, tilt: 78.0, rotHours: 18.65,
+    temp: '≈ −111 °C', moons: 0, seed: 707,
+    surface: { seed: 707, w: 512, stops: [[0, rgb(58, 58, 64)], [0.55, rgb(94, 94, 101)], [1, rgb(134, 134, 141)]], mottle: 0.46, broad: 0.3, craters: 260, boulders: 22 },
+    fact: 'Discovered in 1802, it was the first asteroid ever found after Ceres, and it still holds the record orbit: tilted 35° to the ecliptic, it swings 2 AU above and below the planetary plane on its 4.6-year circuit.'
+  },
+  {
+    name: 'Hygiea', type: 'Main belt · nearly spherical', hex: '#7d766c',
+    au: 3.15, ecc: 0.107, inc: 3.83, node: 283.0, peri: 312.0, tpJD: 2461813.201,
+    radiusKm: 217, shape: [1.01, 1.00, 0.99], lumpy: 0.035, tilt: 124.0, rotHours: 13.83,
+    temp: '≈ −119 °C', moons: 0, seed: 810,
+    surface: { seed: 810, w: 512, stops: [[0, rgb(50, 47, 43)], [0.55, rgb(84, 80, 74)], [1, rgb(120, 115, 107)]], mottle: 0.42, broad: 0.26, craters: 190, boulders: 18 },
+    fact: 'Fourth-largest in the belt and the fourth-largest member of the asteroid family it was blown out of. It spins in under 14 hours — fast enough that it relaxed into a sphere after the collision that made it.'
+  }
+];
+
+function makeLabel(name, hex) {
+  const el = document.createElement('div');
+  el.className = 'label';
+  el.innerHTML = `<i style="background:${hex};color:${hex}"></i>${name}`;
+  labelHost.appendChild(el);
+  return el;
+}
+
+function buildRock(def) {
+  const rU = kmToUnitRaw(def.radiusKm) * ROCK_GAIN;
+  const periodDays = DAYS_PER_YEAR * Math.pow(def.au, 1.5);
+  def.periodDays = periodDays;                 // updateBodies() propagates them like planets
+  const incRad = deg2rad(def.inc);
+
+  const orbitGroup = new THREE.Group();
+  orbitGroup.rotation.order = 'YXZ';
+  orbitGroup.rotation.y = deg2rad(def.node);
+  orbitGroup.rotation.x = incRad * tiltScale;
+  scene.add(orbitGroup);
+
+  const a = auToUnit(def.au), ecc = def.ecc, bMinor = a * Math.sqrt(1 - ecc * ecc);
+  const periRad = deg2rad(def.peri), cw = Math.cos(periRad), sw = Math.sin(periRad);
+  const pts = [];
+  for (let i = 0; i < 384; i++) pts.push(orbitPoint(a, bMinor, ecc, (i / 384) * TAU, cw, sw));
+  const line = new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints(pts),
+    new THREE.LineBasicMaterial({ color: new THREE.Color(def.hex), transparent: true, opacity: 0.2 })
+  );
+  orbitGroup.add(line);
+
+  const pivot = new THREE.Object3D();
+  orbitGroup.add(pivot);
+  const tiltGroup = new THREE.Group();
+  tiltGroup.rotation.z = THREE.MathUtils.degToRad(def.tilt);
+  pivot.add(tiltGroup);
+
+  const tex = toTexture(paintRock(def.surface), 1);
+  const mesh = new THREE.Mesh(rockBody(def, rU), new THREE.MeshStandardMaterial({
+    map: tex, bumpMap: tex, bumpScale: 0.055, roughness: 0.95, metalness: 0.02,
+    emissive: new THREE.Color(def.hex).multiplyScalar(0.05)
+  }));
+  tiltGroup.add(mesh);
+
+  const pick = new THREE.Mesh(
+    new THREE.SphereGeometry(Math.max(1.8, rU * 2.6), 12, 9),
+    new THREE.MeshBasicMaterial({ visible: false })
+  );
+  pivot.add(pick);
+
+  const lbl = makeLabel(def.name, def.hex);
+  const body = {
+    isRock: true, def, info: { ...def, periodDays }, index: bodies.length, r: rU, a,
+    orbitGroup, pivot, tiltGroup, mesh, line, pick, labelEl: lbl,
+    incRad, cw, sw, periodDays,
+    m0Rad: TAU * ((JD_J2000 - def.tpJD) / periodDays),   // mean anomaly at J2000 from perihelion passage
+    rotDays: def.rotHours / 24, spinSign: def.tilt > 90 ? -1 : 1,
+    worldPos: new THREE.Vector3()
+  };
+  pick.userData.body = body;
+  bodies.push(body);
+  pickTargets.push(pick);
+  return body;
+}
+
+const rocks = ROCKS.map(buildRock);
+
 /* --------------------- camera: drag to orbit, scroll to zoom ------------- */
-const MIN_DIST = 9, MAX_DIST = 1100;
+/* How close you may come. Locked to the target: an asteroid is a fraction of a
+   unit across, so following one lets you in far nearer than following Jupiter. */
+const BASE_MIN_DIST = 9;
+let MIN_DIST = BASE_MIN_DIST;
+const MAX_DIST = 1100;
 const cam = { az: 2.35, pol: 1.06, dist: 210, tx: 0, ty: 0, tz: 0 };
 const camSmooth = { az: 2.35, pol: 1.06, dist: 540, target: new THREE.Vector3(0, 0, 0) };
 let following = null;    // body the camera is riding with
@@ -1279,12 +1702,14 @@ function selectBody(body, focus) {
 
 function startFollowing(body) {
   following = body;
+  MIN_DIST = Math.max(2.0, body.r * 3.2);
   cam.dist = clamp((body.isSun ? SUN_RADIUS * 16 : body.r * 9 + 4), MIN_DIST + 2, MAX_DIST);
   followBtn.textContent = 'Following ✓';
   updateChips();
 }
 function stopFollowing() {
   following = null;
+  MIN_DIST = BASE_MIN_DIST;
   followBtn.textContent = 'Follow orbit';
   updateChips();
 }
