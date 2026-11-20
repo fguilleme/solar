@@ -10,6 +10,69 @@ function __pe(type, x, y) {
   return new PointerEvent(type, { pointerId: 1, pointerType: 'mouse', isPrimary: true,
     clientX: x, clientY: y, bubbles: true, cancelable: true });
 }
+/* The catalog gives planets a mean anomaly at J2000 and the named asteroids a
+   perihelion passage; both are the same anomaly once converted, so one
+   reference can serve either. */
+function __meanAnomalyDeg(def) {
+  if (def.m0 !== undefined) return def.m0;
+  return 360 * (JD_J2000 - def.tpJD) / def.periodDays;
+}
+/* Latitude profile of the belt swarm, from the positions it was last drawn at. */
+function __beltLat() {
+  let max = 0, sum = 0, n = 0, over5 = 0, over12 = 0;
+  for (let i = 0; i < BELT_COUNT; i++) {
+    const x = beltPos[i * 3], y = beltPos[i * 3 + 1], z = beltPos[i * 3 + 2];
+    /* Skip a rock sitting on the Sun itself, relative to its own shell so the guard
+       does not move when the distance spread moves. */
+    if (Math.hypot(x, y, z) < 0.2 * beltMeta[i].radius) continue;
+    const rho = Math.hypot(x, z);
+    const lat = Math.atan2(Math.abs(y), rho);
+    max = Math.max(max, lat); sum += lat; n++;
+    if (lat > 5 * Math.PI / 180) over5++;
+    if (lat > 12 * Math.PI / 180) over12++;
+  }
+  const D = Math.PI / 180;
+  return { max: max / D, mean: sum / n / D, over5, over12 };
+}
+/* The head-up distance readout, parsed through the app's thousands separators
+   (fmt() renders 1 134 AU as "1,134.00", which parseFloat alone would read as 1). */
+function __shownAU() {
+  const m = camOutEl.textContent.match(/([-+]?[\d, ]+\.?\d*)/);
+  return m ? parseFloat(m[1].replace(/,/g, '')) : NaN;
+}
+
+/* Mean distance of the drawn belt from the Sun, against the shell it was told to fill. */
+function __beltShell() {
+  let got = 0, want = 0;
+  for (let i = 0; i < BELT_COUNT; i++) {
+    got += Math.hypot(beltPos[i * 3], beltPos[i * 3 + 1], beltPos[i * 3 + 2]);
+    want += beltMeta[i].radius;
+  }
+  return { got: got / BELT_COUNT, want: want / BELT_COUNT };
+}
+/* Furthest drawn orbit vertex, and the radius of the ecliptic grid. */
+function __orbitReach(b) {
+  const p = b.line.geometry.attributes.position;
+  let max = 0;
+  for (let i = 0; i < p.count; i++) max = Math.max(max, Math.hypot(p.getX(i), p.getY(i), p.getZ(i)));
+  return max;
+}
+/* Both ends of the drawn ellipse: an orbit stretched out of shape loses one of them. */
+function __orbitSpan(b) {
+  const p = b.line.geometry.attributes.position;
+  let max = 0, min = Infinity;
+  for (let i = 0; i < p.count; i++) {
+    const r = Math.hypot(p.getX(i), p.getY(i), p.getZ(i));
+    max = Math.max(max, r); min = Math.min(min, r);
+  }
+  return { max, min };
+}
+function __gridRadius() {
+  const p = eclipticGrid.geometry.attributes.position;
+  let max = 0;
+  for (let i = 0; i < p.count; i++) max = Math.max(max, Math.hypot(p.getX(i), p.getY(i), p.getZ(i)));
+  return max;
+}
 function __snap(dist, pol) {
   cam.dist = camSmooth.dist = dist;
   cam.pol = camSmooth.pol = pol;
@@ -65,7 +128,7 @@ setTimeout(() => {
     ok('inner planets sweep faster', dEarth > dJup * 3, 'Earth ' + dEarth.toFixed(2) + ' vs Jupiter ' + dJup.toFixed(2));
     days = daysBefore; updateBodies();
     ok('time model reversible', earth.worldPos.distanceTo(ePos0) < 1e-6);
-    ok('belt populated', BELT_COUNT > 1000 && belt.some(v => v !== 0), 'asteroids ' + BELT_COUNT);
+    ok('belt populated', BELT_COUNT > 1000 && beltPos.some(v => v !== 0), 'asteroids ' + BELT_COUNT);
 
     /* ---- orbital orientation: real i, Ω, ω — checked against an independent
        Keplerian reference written with the textbook z-up convention ---- */
@@ -75,7 +138,7 @@ setTimeout(() => {
     const __tiltOf = b => Math.acos(Math.min(1, Math.abs(__planeOf(b).y))) / D2R;
     function __refUnit(def, d) {                 /* z-up reference -> our y-up frame: (x,y,z)->(x,z,-y) */
       const e = def.ecc, TAU2 = 2 * Math.PI;
-      const M = (((def.m0 * D2R + TAU2 * (d / def.periodDays)) % TAU2) + TAU2) % TAU2;
+      const M = (((__meanAnomalyDeg(def) * D2R + TAU2 * (d / def.periodDays)) % TAU2) + TAU2) % TAU2;
       let E = e < 0.8 ? M : Math.PI;
       for (let i = 0; i < 14; i++) E -= (E - e * Math.sin(E) - M) / (1 - e * Math.cos(E));
       const p = Math.cos(E) - e, q = Math.sqrt(1 - e * e) * Math.sin(E);
@@ -115,11 +178,15 @@ setTimeout(() => {
     ok('earth orbit defines the ecliptic',
        Math.abs(earth.orbitGroup.rotation.x) < 1e-6 && earth.orbitGroup.rotation.y === 0 && earth.orbitGroup.rotation.z === 0,
        'i ' + earth.def.inc + '° Ω ' + earth.def.node + '°');
-    const tilts = bodies.filter(b => !b.isSun).map(b => ({ n: b.def.name, t: __tiltOf(b) }));
-    ok('mercury is the most inclined orbit',
+    const tilts = bodies.filter(b => !b.isSun && !b.isRock).map(b => ({ n: b.def.name, t: __tiltOf(b) }));
+    ok('mercury is the most inclined planet',
        tilts.every(t => t.t <= __tiltOf(bodies.find(b => b.def.name === 'Mercury')) + 1e-9) &&
        tilts.filter(t => t.t > 1).length === 6,
        tilts.map(t => t.n[0] + t.t.toFixed(2)).join(' '));
+    ok('named asteroids keep their own inclinations',
+       Math.abs(__tiltOf(bodies.find(b => b.def.name === 'Pallas')) - 34.9) < 1e-4 &&
+       Math.abs(__tiltOf(bodies.find(b => b.def.name === 'Vesta')) - 7.14) < 1e-4,
+       'Pallas 34.9° · Vesta 7.14°, straight from the Small-Body Database');
     ok('orbit planes are not randomised',
        bodies.every(b => b.isSun || b.orbitGroup.rotation.z === 0), 'all orbit groups use Rx(i) only');
     btnTilt.click(); applyTiltScale(); updateBodies();
@@ -129,18 +196,17 @@ setTimeout(() => {
     ok('tilt viewer returns to true inclinations',
        tiltScale === 1 && Math.abs(__tiltOf(bodies.find(b => b.def.name === 'Mercury')) - 7.004979) < 1e-6,
        'Mercury ' + __tiltOf(bodies.find(b => b.def.name === 'Mercury')).toFixed(4) + '°');
-    let beltTiltMax = 0;
-    for (let i = 0; i < BELT_COUNT; i++) {
-      const x = belt[i * 3], y = belt[i * 3 + 1], z = belt[i * 3 + 2];
-      beltTiltMax = Math.max(beltTiltMax, Math.abs(y) / Math.hypot(x, y, z));
-    }
-    ok('asteroid belt hugs the ecliptic', beltTiltMax < Math.sin(10 * D2R), 'max latitude ' + (Math.asin(beltTiltMax) / D2R).toFixed(2) + '°');
+    updateBelt(days);
+    const beltLat = __beltLat();
+    ok('asteroid belt hugs the ecliptic', beltLat.mean < 6 && beltLat.max <= 24.001,
+       'mean latitude ' + beltLat.mean.toFixed(2) + '° · max ' + beltLat.max.toFixed(2) +
+       '°, inside the 24° belt envelope');
 
     /* ---- the belt is a 3D swarm, not a tilted pinwheel ---- */
     // Failing version: scatter height but reuse one ascending node for every asteroid.
     // Discriminator: <y^2 cos 2lon> over inclined bodies. Nodes spread over 360° makes the
     // distribution rotationally symmetric -> 0. A single shared node -> about -0.1.
-    const bp = belt;
+    const bp = beltPos;
     let hi = 0, nodeSum = 0, nodeWeight = 0;
     for (let i = 0; i < bp.length; i += 3) {
       const x = bp[i], y = bp[i + 1], z = bp[i + 2];
@@ -151,32 +217,33 @@ setTimeout(() => {
       if (lat > 1 * D2R) { nodeSum += y * y * Math.cos(2 * Math.atan2(-z, x)); nodeWeight += y * y; }
     }
     const nodeStat = nodeSum / nodeWeight;
-    const beltMaxLat = Math.asin(beltTiltMax) / D2R;
-    ok('belt inclination spread is real', hi > 120 && beltMaxLat > 8 && beltMaxLat < 10,
-       hi + ' of ' + BELT_COUNT + ' above 5° latitude now, max ' + beltMaxLat.toFixed(2) + '° (catalog inclination tops out at 9.6°)');
+    ok('belt inclination spread is real', hi > 120 && beltLat.max > 15 && beltLat.over12 > 40,
+       hi + ' of ' + BELT_COUNT + ' above 5° latitude, ' + beltLat.over12 + ' above 12°, max '
+       + beltLat.max.toFixed(2) + '° (resonance-pumped belt tops out at 24°)');
     ok('belt ascending nodes are distributed, not shared', Math.abs(nodeStat) < 0.05,
        '<y² cos 2λ> = ' + nodeStat.toFixed(4) + ' (0 = spread nodes, ≈ -0.1 = one shared node)');
 
     // The exaggeration viewer must fan the belt out too, and the belt caps itself at 4×
     // so it never wraps over the pole.
-    const beltLatAt = scale => {
+    const __beltHeights = scale => {
       tiltScale = scale; applyTiltScale(); updateBelt(days);
-      let m = 0;
-      for (let i = 0; i < BELT_COUNT; i++) {
-        const x = belt[i * 3], y = belt[i * 3 + 1], z = belt[i * 3 + 2];
-        const rho = Math.hypot(x, z);
-        if (rho < 20) continue;
-        m = Math.max(m, Math.atan2(Math.abs(y), rho));
-      }
-      return m / D2R;
+      const out = [];
+      for (let i = 0; i < BELT_COUNT; i++) out.push(Math.abs(beltPos[i * 3 + 1]));
+      return out;
     };
-    const beltBoost4 = beltLatAt(4);
-    const beltBoost5 = beltLatAt(5);
+    const flatY = __beltHeights(1), pumpedY = __beltHeights(4), cappedY = __beltHeights(5);
+    let flatSum = 0, pumpedSum = 0, cappedSum = 0, moved = 0;
+    for (let i = 0; i < BELT_COUNT; i++) {
+      flatSum += flatY[i]; pumpedSum += pumpedY[i]; cappedSum += cappedY[i];
+      if (pumpedY[i] !== cappedY[i]) moved++;
+    }
+    const beltGain = pumpedSum / flatSum, cappedGain = cappedSum / flatSum;
     tiltScale = 1; applyTiltScale(); updateBelt(days);
-    ok('belt follows the tilt viewer', beltBoost4 > beltMaxLat * 2.5 && beltBoost4 < 40,
-       'max latitude ' + beltMaxLat.toFixed(1) + '° → ' + beltBoost4.toFixed(1) + '° at ×4');
-    ok('belt tilt exaggeration is capped at 4×', Math.abs(beltBoost5 - beltBoost4) < 1e-9,
-       '×4 → ' + beltBoost4.toFixed(2) + '° and ×5 → ' + beltBoost5.toFixed(2) + '° (identical: the belt stops tilting at 4×)');
+    ok('belt follows the tilt viewer', beltGain > 3 && beltGain < 4.05,
+       'mean swarm height at ×4 is ' + beltGain.toFixed(3) + '× the flat case (1.00 would mean the belt ignores the viewer)');
+    ok('belt tilt exaggeration is capped at 4×', moved === 0,
+       '×5 moves ' + moved + ' of ' + BELT_COUNT + ' rocks: mean height ' + beltGain.toFixed(3)
+       + '× flat at ×4 against ' + cappedGain.toFixed(3) + '× at ×5');
 
     /* ---- ecliptic reference grid ---- */
     ok('ecliptic reference grid present', eclipticGrid.isLineSegments === true && eclipticGrid.visible === true);
@@ -269,14 +336,13 @@ setTimeout(() => {
     const labelsOff = bodies.every(b => b.labelEl.style.opacity === '0');
     btnLabels.click(); updateLabels();
     ok('labels toggle', labelsOff && bodies.some(b => parseFloat(b.labelEl.style.opacity) > 0));
-    const chips = document.querySelectorAll('.chip').length;
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: '3', bubbles: true }));
+    const chips = document.querySelectorAll('.chip').length;    window.dispatchEvent(new KeyboardEvent('keydown', { key: '3', bubbles: true }));
     ok('number key focuses planet', selected === earth && following === earth, selected && selected.def.name);
     window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
     const frozenAt = days;
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     ok('escape closes card', !card.classList.contains('show'));
-    ok('focus chips present', chips === 9, 'chips ' + chips);
+    ok('focus chips present', chips === 13, 'chips ' + chips);
     ok('paused freezes time', Math.abs(days - frozenAt) < 1e-9);
     window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
     btnReset.click();
@@ -334,6 +400,198 @@ setTimeout(() => {
     ok('hovered label is never decluttered away', culledHover === 0,
        culledHover + ' hovered labels hidden out of ' + crowded + ' that would have been');
     ok('selected label is never decluttered away', culledSelect === 0, culledSelect + ' selected labels hidden');
+
+    /* ---- the Distance spread setting -------------------------------------
+       Scene distances are a compressed power of the real semi-major axis so the
+       inner system stays legible. The setting changes that exponent and nothing
+       else: the drawn ellipses, the belt shell, the grid and the framing follow
+       it, while every real number the app reports stays what the ephemeris gave.
+       Failing versions: a slider that only moves a readout; a rescale that
+       stretches old geometry; a rescale that also touches the angles. */
+    const planetsOnly = bodies.filter(b => !b.isSun && !b.isRock);
+    const mercuryB = bodies.find(b => b.def.name === 'Mercury');
+    const neptuneB = bodies.find(b => b.def.name === 'Neptune');
+    const earthB = bodies.find(b => b.def.name === 'Earth');
+    const outerAu = Math.max(...CATALOG.map(c => c.au));
+    const outerB = planetsOnly.find(b => Math.abs(b.def.au - outerAu) < 1e-12);
+    const auRatio = outerB.def.au / mercuryB.def.au;
+    const unitRatio = () => neptuneB.a / mercuryB.a;
+    const __dir = b => { const p = b.worldPos, n = p.length(); return [p.x / n, p.y / n, p.z / n]; };
+    const dirsBefore = bodies.filter(b => !b.isSun).map(__dir);
+    const planesBefore = bodies.filter(b => !b.isSun).map(__planeOf);
+    const gridAtDefault = __gridRadius();
+    const gridRatioDefault = gridAtDefault / auToUnit(outerAu);   /* grid span / outer orbit */
+    const fitAtDefault = 210 / auToUnit(outerAu);                 /* overview camera / outer orbit */
+    const cardJupiter = (() => { selectBody(jupiter, true); const t = els.dist.textContent; deselect(); return t; })();
+
+    const reachAt = {};
+    let earthDrift = 0;
+    for (let p = DIST_POWER_MIN; p <= DIST_POWER_MAX + 1e-9; p += DIST_POWER_STEP) {
+      setDistancePower(p);
+      reachAt[p.toFixed(2)] = unitRatio();
+      earthDrift = Math.max(earthDrift, Math.abs(earthB.a - 18 * earthB.def.au));
+    }
+    ok('Earth orbit is the fixed yardstick at every spread', earthDrift < 1e-9,
+       "Earth stays at 18.0 units from a^0.40 to a^1.00");
+    ok('lower spread squeezes the outer system inward',
+       reachAt['0.40'] < reachAt['0.55'] && reachAt['0.55'] < reachAt['1.00'] &&
+       Math.abs(reachAt['1.00'] / auRatio - 1) < 1e-9,
+       'Neptune/Mercury ' + reachAt['1.00'].toFixed(1) + ' units = the real AU ratio, '
+       + reachAt['0.55'].toFixed(1) + ' at a^0.55, ' + reachAt['0.40'].toFixed(1) + ' at a^0.40');
+
+    setDistancePower(1);
+    let worstProportional = 0;
+    for (const b of planetsOnly)
+      worstProportional = Math.max(worstProportional, Math.abs((b.a / earthB.a) / (b.def.au / earthB.def.au) - 1));
+    ok('spread 1.00 is true proportional spacing', worstProportional < 1e-9,
+       'Mercury ' + mercuryB.a.toFixed(2) + ' · Neptune ' + neptuneB.a.toFixed(2) + ' units, every orbit ratio'
+       + ' matches its AU ratio to ' + worstProportional.toExponential(1));
+
+    let worstApoapsis = 0, worstPeriapsis = 0;
+    for (const b of bodies) {
+      if (b.isSun || !b.line) continue;
+      const span = __orbitSpan(b);
+      worstApoapsis = Math.max(worstApoapsis, Math.abs(span.max / (b.a * (1 + b.def.ecc)) - 1));
+      worstPeriapsis = Math.max(worstPeriapsis, Math.abs(span.min / (b.a * (1 - b.def.ecc)) - 1));
+    }
+    ok('orbit lines are re-solved at the new spread, not stretched',
+       worstApoapsis < 1e-6 && worstPeriapsis < 1e-6,
+       'every drawn line still reaches a(1+e) and a(1−e) at ' + (bodies.length - 1)
+       + ' orbits to ' + worstApoapsis.toExponential(1) + ' / ' + worstPeriapsis.toExponential(1)
+       + ' (float32 vertex buffers)');
+
+    /* Sweep the control and compare what the scene does against what the distance law
+       predicts — computed here in the test from the AU values and the exponent, never
+       from the app's own conversion, because a bug in a conversion agrees with itself. */
+    const POWERS = [DIST_POWER_MIN, DIST_POWER_DEFAULT, 0.70, DIST_POWER_MAX];
+    const lawUnits = (au, p) => 18 * Math.pow(au, p);            // the scene law under test
+    const shellWant = p => beltMeta.reduce((s, m) => s + Math.pow(m.au, p), 0) / beltMeta.length * 18;
+    const seen = {};
+    for (const p of POWERS) {
+      setDistancePower(p);
+      const lat = __beltLat();
+      seen[p.toFixed(2)] = { rocks: __beltShell().got, grid: __gridRadius(), latMax: lat.max, latMean: lat.mean };
+    }
+    const key = p => p.toFixed(2);
+
+    ok('the belt follows the same distance law as the planets',
+       POWERS.every(p => Math.abs(seen[key(p)].rocks / shellWant(p) - 1) < 0.04),
+       POWERS.map(p => 'a^' + key(p) + ' mean rock shell ' + seen[key(p)].rocks.toFixed(1)
+         + ' u against ' + shellWant(p).toFixed(1) + ' u predicted from 4 600 real au').join(' · '));
+
+    ok('the ecliptic grid keeps its span to the outer orbit at every spread',
+       POWERS.every(p => { const r = seen[key(p)].grid / lawUnits(outerAu, p);
+         return Math.abs(r / gridRatioDefault - 1) < 2e-3 && r > 1.05 && r < 1.6; }),
+       POWERS.map(p => 'a^' + key(p) + ' grid ' + seen[key(p)].grid.toFixed(1) + ' u around a '
+         + lawUnits(outerAu, p).toFixed(1) + ' u orbit (' + (seen[key(p)].grid / lawUnits(outerAu, p)).toFixed(3)
+         + '×)').join(' · '));
+
+    ok('belt latitudes are untouched by the spread',
+       POWERS.every(p => Math.abs(seen[key(p)].latMax - seen['0.55'].latMax) < 1e-4 &&
+                         Math.abs(seen[key(p)].latMean - seen['0.55'].latMean) < 1e-4),
+       POWERS.map(p => 'a^' + key(p) + ' ' + seen[key(p)].latMean.toFixed(4) + '° mean / '
+         + seen[key(p)].latMax.toFixed(3) + '° max').join(' · ') + ' — identical to 1e-4° (float32 floor)'),
+
+    resetView();
+    ok('reset frames the system at whatever spread is set',
+       Math.abs(cam.dist / lawUnits(outerAu, distPower) - fitAtDefault) < 1e-6 && cam.dist <= MAX_DIST,
+       'camera ' + cam.dist.toFixed(1) + ' units from the Sun against an outer orbit at '
+       + lawUnits(outerAu, distPower).toFixed(1));
+
+    /* A spread change must not throw the view you are looking at. Sit in the overview,
+       change the setting four times without touching the camera, and project the outer
+       orbit through the live camera each time: the same arc of the system has to land on
+       the same arc of the frame. Ratio alone is not proof — the projection is. */
+    const __frameReach = b => {
+      scene.updateMatrixWorld(true);
+      const attr = b.line.geometry.attributes.position, v = new THREE.Vector3();
+      let far = 0;
+      for (let i = 0; i < attr.count; i += 3) {
+        v.set(attr.getX(i), attr.getY(i), attr.getZ(i));
+        b.orbitGroup.localToWorld(v); v.project(camera);
+        far = Math.max(far, Math.abs(v.x), Math.abs(v.y));
+      }
+      return far;
+    };
+    resetView();
+    for (let i = 0; i < 90; i++) updateCamera(0.016);
+    const framed = {};
+    for (const p of [DIST_POWER_MIN, DIST_POWER_DEFAULT, 0.70, DIST_POWER_MAX]) {
+      setDistancePower(p);
+      for (let i = 0; i < 90; i++) updateCamera(0.016);
+      framed[p.toFixed(2)] = { reach: __frameReach(outerB), fit: cam.dist / auToUnit(outerAu), dist: cam.dist };
+    }
+    const reaches = Object.values(framed).map(f => f.reach), fits = Object.values(framed).map(f => f.fit);
+    ok('the view you are looking at survives a spread change',
+       Math.max(...reaches) - Math.min(...reaches) < 0.02 &&
+       Math.max(...fits) - Math.min(...fits) < 1e-6,
+       Object.keys(framed).map(k => 'a^' + k + ' cam ' + framed[k].dist.toFixed(0)).join(' · ') +
+       ' \u00b7 outer orbit reaches ' + reaches.map(r => r.toFixed(2)).join(' / ') + ' of the frame');
+
+    /* Park the overview camera at a fixed 300 units from the Sun at every spread and
+       read what the head-up display claims in AU. The expectation is computed here from
+       the pin (18 u = 1 au) and the exponent, so a readout that keeps inverting the
+       default exponent — or reports scene units — fails. */
+    const readoutAt = {};
+    for (const p of POWERS) {
+      setDistancePower(p);
+      resetView();
+      cam.dist = camSmooth.dist = 300;
+      cam.pol = camSmooth.pol = 1.06; camSmooth.target.set(0, 0, 0); cam.tx = cam.ty = cam.tz = 0;
+      for (let i = 0; i < 40; i++) updateCamera(0.016);
+      updateReadouts();
+      readoutAt[key(p)] = __shownAU();
+    }
+    ok('the AU readout inverts the live spread, not a hard-coded one',
+       POWERS.every(p => Math.abs(readoutAt[key(p)] / Math.pow(300 / 18, 1 / p) - 1) < 0.02),
+       POWERS.map(p => 'a^' + key(p) + ' reads ' + readoutAt[key(p)].toFixed(1)
+         + ' au at 300 u, ' + Math.pow(300 / 18, 1 / p).toFixed(1) + ' au expected').join(' · '));
+
+    setDistancePower(DIST_POWER_MAX);
+    cam.dist = camSmooth.dist = 18 * outerAu;                 /* Neptune's own orbit at true spacing */
+    camSmooth.target.set(0, 0, 0); cam.tx = cam.ty = cam.tz = 0;
+    for (let i = 0; i < 12; i++) updateCamera(0.016);
+    updateReadouts();
+    const auShown = __shownAU();
+    ok('parked on Neptune at true spacing the readout says Neptune', Math.abs(auShown - outerAu) < 0.05,
+       'readout ' + auShown + ' AU at ' + cam.dist.toFixed(0) + ' units');
+
+    selectBody(jupiter, true);
+    const cardAfter = els.dist.textContent;
+    deselect();
+    ok('the setting never touches a reported number', cardAfter === cardJupiter,
+       'Jupiter card at a^1.00 reads ' + cardAfter.replace(/\s+/g, ' '));
+
+    let dirDrift = 0, planeDrift = 0;
+    bodies.filter(b => !b.isSun).forEach((b, i) => {
+      const d = __dir(b), p = __planeOf(b), d0 = dirsBefore[i], n0 = planesBefore[i];
+      dirDrift = Math.max(dirDrift, Math.abs(d[0] - d0[0]) + Math.abs(d[1] - d0[1]) + Math.abs(d[2] - d0[2]));
+      planeDrift = Math.max(planeDrift, Math.abs(p.x - n0.x) + Math.abs(p.y - n0.y) + Math.abs(p.z - n0.z));
+    });
+    ok('no angle of any orbit moves with the spread', dirDrift < 1e-12 && planeDrift < 1e-12,
+       'directions and orbit planes identical before and after: ' + dirDrift.toExponential(1) + ' / ' + planeDrift.toExponential(1));
+
+    setDistancePower(DIST_POWER_DEFAULT);
+    for (let i = 0; i < 2; i++) window.dispatchEvent(new KeyboardEvent('keydown', { key: ']', bubbles: true }));
+    ok('] opens the spread one step', distPower === 0.65 && parseFloat(spreadInput.value) === 0.65 &&
+       neptuneB.a / mercuryB.a > reachAt['0.55'], 'a^' + distPower);
+    for (let i = 0; i < 8; i++) window.dispatchEvent(new KeyboardEvent('keydown', { key: '[', bubbles: true }));
+    ok('[ clamps at the tightest spread', distPower === DIST_POWER_MIN && parseFloat(spreadInput.value) === DIST_POWER_MIN,
+       'a^' + distPower + ' \u00b7 readout ' + spreadOut.textContent.trim());
+    spreadInput.value = '0.85';
+    spreadInput.dispatchEvent(new Event('input'));
+    ok('the slider drives the scene', Math.abs(distPower - 0.85) < 1e-12 &&
+       spreadOut.textContent.includes('0.85') && Math.abs(unitRatio() / Math.pow(auRatio, 0.85) - 1) < 1e-9,
+       'slider ' + spreadInput.value + ' \u00b7 power ' + distPower + ' \u00b7 readout "' + spreadOut.textContent.trim()
+       + '" \u00b7 Neptune/Mercury ' + unitRatio().toFixed(2) + ' units, AU ratio^0.85 = ' + Math.pow(auRatio, 0.85).toFixed(2));
+    ok('the scale note states the live setting', /a\^0\.85/.test(scaleNoteEl.textContent), scaleNoteEl.textContent.trim());
+
+    setDistancePower(DIST_POWER_DEFAULT);
+    resetView();
+    ok('the built compression is the default view',
+       distPower === DIST_POWER_DEFAULT && Math.abs(unitRatio() - reachAt['0.55']) < 1e-9 &&
+       Math.abs(__gridRadius() - gridAtDefault) < 1e-6 && Math.abs(cam.dist - 210) < 1e-6,
+       'a^0.55 \u00b7 grid ' + __gridRadius().toFixed(1) + ' \u00b7 camera ' + cam.dist.toFixed(1));
 
     const failed = CHECKS.filter(c => !c.pass);
     const pre = document.createElement('pre'); pre.id = 'results';

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Headless test runner for the orrery.
 #
-#   ./test/run.sh              run the full self-test (118 assertions) + label test
+#   ./test/run.sh              run the full self-test + label test
 #   ./test/run.sh selftest     only the full self-test
 #   ./test/run.sh labels       only the label decluttering test
+#   ./test/run.sh negatives    run the suite against deliberately broken builds (see test/negative-controls.py)
 #   ./test/run.sh shots        write test/shot-true.png and test/shot-tilt.png
 #   ./test/run.sh docs         regenerate docs/*.png (the images in README.md)
 #
@@ -132,6 +133,12 @@ if [ "$mode" = "all" ] || [ "$mode" = "labels" ]; then
   echo "== label decluttering =="
   run_headless "$build/labeltest.html" "$build/labeltest-dom.html" 1400 || { echo "  chrome exited $?"; rc=1; }
   summarise_labels "$build/labeltest-dom.html" || rc=1
+fi
+
+if [ "$mode" = "negatives" ]; then
+  echo "== negative controls (a broken build must not pass) =="
+  python3 "$testdir/negative-controls.py" "${2:-}"
+  rc=$?
 fi
 
 if [ "$mode" = "shots" ]; then
