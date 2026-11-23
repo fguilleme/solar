@@ -64,7 +64,7 @@ python3 -m http.server 8000   # then visit http://localhost:8000/index.html
 | click a body | open its data card, highlight its orbit |
 | hover a body | tooltip + highlight ring |
 | **Time rate** slider | 0 → 40 simulated days per real second |
-| **Distance spread** slider `a^0.40 → a^1.00` | how hard the distances are squeezed together; `a^1.00` is *no compression at all* (`[` / `]`) |
+| **Distance spread** slider `a^0.40 → a^1.00` | one ruler for everything: how hard the distances are squeezed together **and how large the bodies are drawn with them**; `a^1.00` is *no distance compression at all* (`[` / `]`) |
 | **Pause** | freeze time (also `Space`) |
 | **Orbits** | show / hide orbital paths (`O`) |
 | **Labels** | show / hide planet labels (`L`) |
@@ -172,12 +172,22 @@ const AU_GAIN = 18;                                        // Earth's orbit is p
 let   distPower = DIST_POWER_DEFAULT;                      // 0.55 — and the user can change it
 const auToUnit  = au => AU_GAIN * Math.pow(au, distPower); // Neptune at 30.07 au -> 117 units
 const unitToAu  = units => Math.pow(Math.max(1e-6, units) / AU_GAIN, 1 / distPower);   // exact inverse
-const kmToUnit  = km => 1.25 * Math.pow(km / 6371, 0.42);
-const SUN_RADIUS = 4.6;                                    // real value would be 32 units
+const kmToUnit  = km => 1.25 * Math.pow(km / 6371, sizeExp()) * sizeGain();
+const sizeExp   = () => 0.42 + (distPower - 0.55) * 0.12;  // the size law rides the same slider
+const sizeGain  = () => min(spanGain() ** 0.3,             // how much height the ruler gains
+                            (0.9 * auToUnit(0.387)) / 4.6) // capped: star ≤ 90% of Mercury's orbit
+const SUN_RADIUS = 4.6;                                    // star radius in display units at the
+                                                           // default spread: a calibrated display
+                                                           // constant, never auToUnit() of the Sun
 ```
 
+`1.25`, `0.42`, `4.6` and the tracks below come from calibrating the *look* at the default spread,
+the way a planetarium does — Earth's orbit pinned at 18 units, bodies drawn at sizes that keep the
+scene readable. They are not derived from the distance law.
+
 Ordering, eccentricity, inclination and Kepler's second law (faster near perihelion) all
-survive the compression; absolute sizes do not. The on-screen footnote says so.
+survive the compression. Absolute sizes follow the slider too, on their own deliberately gentler
+law — see *The size ruler rides the same slider*. The on-screen footnote says so.
 
 **Distance spread is that exponent, and it is a user setting.** The default is `a^0.55`;
 `a^1.00` means *no distance compression whatsoever* — every orbit sits at exactly its `a`
@@ -193,9 +203,59 @@ not change), the overview camera (`cam.dist` tracks `auSpanAt(distPower)`, which
 system keeps the same framing at every spread), and the camera AU readout (`unitToAu`).
 
 What does not: `a, e, i, Ω, ω, M₀`, orbit plane orientations, periods, the simulated date,
-the AU and million-kilometre figures on the cards, or body radii. The spread changes the
-ruler, not the solar system — and the self-test asserts exactly that, by predicting the same
-quantities from `18 · au^p` in the harness instead of trusting the app's own conversion.
+or the AU and million-kilometre figures on the cards. The spread changes the ruler, not the
+solar system — and the self-test asserts exactly that, by predicting the same quantities from
+`18 · au^p` in the harness instead of trusting the app's own conversion.
+
+### The size ruler rides the same slider
+
+Spreading the orbits alone leaves the bodies at their old size, which is what makes a compressed
+model unreadable: at `a^0.40` the disc of Jupiter covers a twelfth of its own orbit and the star
+nearly bridges Mercury's, while at `a^1.00` those same discs are specks in a field thirty orbits
+wide. So the slider that sets the distance ruler sets the size ruler too — on its own law, not on
+`au^p`:
+
+```js
+sizeExp()      = 0.42 + (distPower − 0.55) · SIZE_POWER_TRACK (0.12)   // the km exponent
+sizeGain()     = min( spanGain() ** SIZE_SPAN_TRACK (0.3),             // height the ruler gains
+                      SIZE_FRAME_CAP (0.9) · auToUnit(0.387) / 4.6 )   // star ≤ 90% of its orbit
+kmToUnit(km)   = 1.25 · (km / 6371) ** sizeExp() · sizeGain()          // planets, Ceres & co.
+rockSize(km)   = kmToUnit(km) · 1.8 · spanGain() ** ROCK_SPAN_TRACK (0.7)  // belt rubble
+```
+
+Measured across the slider (selftest output, not design intentions):
+
+| spread | Mercury ↔ Neptune | Mercury ↔ Jupiter | Sun | Jupiter | Ceres | mean belt rock | largest planet ÷ star | star ÷ Mercury's orbit | belt glyph scale |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `a^0.40` | 12.27× | 2.25× | 3.95 u | 2.81 u | 0.47 u | 0.16 u | 71 % | 32 % | 0.60× |
+| `a^0.55` | 19.79× | 2.45× | 4.60 u | 3.42 u | 0.75 u | 0.22 u | 74 % | 43 % | 1.00× |
+| `a^0.70` | 27.83× | 2.62× | 5.36 u | 4.16 u | 1.20 u | 0.35 u | 78 % | 58 % | 1.67× |
+| `a^1.00` | 30.07× | 2.72× | 6.27 u | 5.30 u | 2.60 u | 0.65 u | 85 % | 90 % | 4.63× |
+
+**Why `0.12` on the exponent and `0.3` on the height.** A size ruler that followed the orbits fully
+would need the star at 86 % of Mercury's orbit *before* any cap, i.e. the cap would be the law
+rather than a safety net. `SIZE_SPAN_TRACK 0.3` makes the height grow with the frame without
+overtaking it, and `SIZE_POWER_TRACK 0.12` keeps the km exponent between 0.40 and 0.47 over the
+whole slider: opening the spread grows the Mercury↔Jupiter disc ratio by 1.21× while the gap they
+ride on grows 1.35×. That is the balance the slider is for — Mercury is 79 % the width of Jupiter
+at `a^0.40`, and every disc stays *smaller than the space around it* at `a^1.00` (tightest
+orbit/disc ratio 12×, the widest belt rock 2.8 % of its own shell). `SIZE_FRAME_CAP 0.9` is what
+stops a body swallowing the orbit it rides; at `a^1.00` it is what binds, and the star sits at
+exactly 90 % of Mercury's orbit.
+
+The same control also drives the **belt rubble** (`rockSize`, with its own `0.7` track because the
+rocks live on a shell rather than on the frame), the belt **point glyphs** (4 600 rocks are drawn
+with a screen-space point size `uScale`; the camera pull-back at wide spread would turn the belt
+into a hairline, so `uScale` tracks `spanGain()` fully — `BELT_DOT_TRACK 1`), the **Earth–Moon
+system** (scaled at the Moon's pivot, so the Moon grows *and* its separation from Earth grows with
+it), the **pick targets** (the hidden hit-spheres keep their proportion to the disc they serve),
+and the **follow camera**, which multiplies its distance by the body's own growth factor, so
+riding Jupiter and then opening the spread keeps the same framing of Jupiter instead of diving
+into it.
+
+At the extreme, holding the default framing at `a^1.00` wants a camera at 1 134 units and
+`MAX_DIST 1100` clamps it: at the far end of the slider Neptune sits a whisker outside the default
+overview (1 094 of the 1 134 of a frame reach) and the wheel takes you the rest of the way.
 
 ---
 
@@ -228,7 +288,7 @@ quantities from `18 · au^p` in the harness instead of trusting the app's own co
 
 ```bash
 ./test/run.sh            # full self-test + label test
-./test/run.sh selftest   # 157 assertions from 85 check sites
+./test/run.sh selftest   # 168 assertions from 96 check sites
 ./test/run.sh labels     # label decluttering across 8 camera views
 ./test/run.sh negatives  # the suite against deliberately broken builds — see "Negative controls"
 ./test/run.sh shots      # best-effort headless screenshots → test/shot-true.png, test/shot-tilt.png
@@ -241,7 +301,7 @@ node test/orbit-report.mjs
 window, virtual-time budget, throw-away profile). **`index.html` is never modified** — the
 shipped file contains no test code. Generated scratch copies land in `test/build/`.
 
-Current status: `total 157 · failed 0 · exception None` (85 check sites, all 14 negative
+Current status: `total 168 · failed 0 · exception None` (96 check sites, all 23 negative
 controls catching).
 
 The suite covers geometry and physics (orbit radius vs. real `a`, Kepler ordering, orbit
@@ -254,7 +314,15 @@ true proportional spacing to Neptune at 30.07 ×, orbit lines **re-solved** from
 the new exponent rather than stretched, belt shells and the ecliptic grid following the same
 law as the planets, camera framing and the AU readout tracking the live exponent, no angle of
 any orbit moving, `a`, `e`, `i`, `Ω`, `ω`, `M₀` and every reported AU/km figure untouched,
-the slider and `[` `]` actually driving the scene), the starfield, picking (hover, click, Sun
+the slider and `[` `]` actually driving the scene) and the **size ruler the same slider sets**
+(the built ruler recomputed from the raw calibration numbers `18 u`/au, `1.25`, `km^0.42`,
+`4.6 u`, `1.8` and the tracks — never from the page's own `kmToUnit` — every body's radius
+checked against it, the ruler rising as the spread opens instead of being left behind by the
+frame, the star staying the largest disc and never swallowing Mercury's orbit, no disc
+approaching the orbit it rides, the belt rocks and the belt glyph scale tracking the camera the
+spread forces, the Earth–Moon pivot growing as a system, the scale note stating the live law,
+the **meshes actually drawn** at the radius the ruler claims, and follow-camera framing preserved
+when the ruler rises), the starfield, picking (hover, click, Sun
 selection, drag must not select), camera (drag rotate, wheel zoom in/out clamping, follow mode
 keeps the target on screen and finite, reset), the UI (speed slider, pause, zero-speed readout,
 resume, orbit toggle, label toggle, number-key focus, `Esc`, chips), and rendering (label
@@ -291,6 +359,15 @@ broken build slips through** — a variant that passes is reported as a blind sp
 | `reset-ignores-spread` — `cam.dist = 210` always | `reset frames the system at whatever spread is set` → 210 u against a 541 u orbit at a^1.00 |
 | `grid-ignores-spread` — the grid keeps its default size | `the ecliptic grid keeps its span to the outer orbit` → 2.207× at a^0.40 instead of 1.325× |
 | `readout-hard-coded-power` — `unitToAu` inverted with the old exponent | `the AU readout inverts the live spread` → 166.6 au where 1 134.0 is expected; `parked on Neptune at true spacing` → 486.95 AU at 541 units |
+| `size-exponent-ignores-spread` — `SIZE_POWER_TRACK 0` | `every body's radius follows the size law the spread sets` → Jupiter 2.93 u where 2.81 is predicted at `a^0.40`; the note admits it says `km^0.42` at every spread |
+| `ruler-height-ignores-spread` — `SIZE_SPAN_TRACK 0` | `the size ruler rises with the spread …` → Jupiter 3.42 → 3.89 instead of 3.42 → 5.30 u, mean belt rock 0.217 → 0.478 instead of → 0.652 |
+| `sizes-computed-never-applied` — `applySize()` called on nothing | `the size ruler rises …` → Jupiter 3.42 → 3.42 u, Ceres 0.75 → 0.75 u while the frame opens |
+| `star-cap-removed` — `SIZE_FRAME_CAP 1e9` | `the star never swallows the orbit its planets ride` → star at 104.5 % of Mercury's orbit at `a^1.00` |
+| `sun-display-frozen` — the star ignores `sizeGain()` | `the discs drawn are the discs the ruler claims` → star mesh 4.60 u against 3.95 u claimed at `a^0.40` |
+| `belt-rubble-ignores-spread` — belt rocks keep their old `rU` | `the size ruler rises …` → mean belt rock 0.217 → 0.217 u while Ceres grows to 2.60 u |
+| `belt-dots-ignore-frame` — `BELT_DOT_TRACK 0` | `the belt point layer is compensated for the camera the spread forces` → glyph scale 1.00× while the camera pulls back 4.63× |
+| `moon-system-frozen` — the Moon pivot never scaled | `the Earth-Moon system grows as a system` → pivot 1.000× while the disc group grows: clearance stays 0.90 u instead of 1.23 u |
+| `ride-not-rescaled` — spread changes never touch a follow camera | `riding a body keeps its framing when the ruler rises` → camera 10.17× Jupiter's radius before, 6.55× after |
 | label priority **and** placement exemption both removed | `hovered label is never decluttered away` → Mercury disappears from the crowded view |
 
 Three of these deserve a footnote. **Labels** are protected twice: the hovered/selected body is
@@ -315,6 +392,14 @@ the label but `auToUnit` stays at 0.55) passed every assertion that derived its 
 from `auToUnit`, and only failed once the harness computed `18 · au^p` itself. That is why the
 spread assertions are written the way they are.
 
+**The size ruler** is falsified the same way, and it needs several independent attacks because a
+size law can fail in at least four ways: the exponent ignores the spread, the height ignores the
+spread, the size is computed and never applied to the geometry, or a guard (the star cap) is
+removed. `sizes-computed-never-applied` is the one a reader cannot see from the numbers alone —
+`b.r` is correct, the mesh is not — so `the discs drawn are the discs the ruler claims` compares
+the **world scale of the meshes** with the claimed radii, and `sun-display-frozen` (which leaves
+`SUN_RADIUS` untouched while the planets grow) is caught only by it.
+
 Headless Chrome is flaky with large windows and long virtual-time budgets: SwiftShader has to
 rasterise every frame, and `--dump-dom` waits for the budget to run out. The defaults
 (500×320, budget 3500) are deliberately small; if they exit `124` the harness never finished
@@ -338,7 +423,7 @@ Files:
 
 | path | role |
 | --- | --- |
-| `index.html` | the deliverable: HTML + CSS + module JS in one file (~2 190 lines, 96 KB) |
+| `index.html` | the deliverable: HTML + CSS + module JS in one file (~3 820 lines, 128 KB) |
 | `test/selftest.js` | full harness, injected at runtime |
 | `test/labeltest.js` | fast label-only harness (no pixel reads) |
 | `test/view_block.js` | camera/tilt pose helper used for screenshots (`#tiltClicks|polar|dist`) |
@@ -398,8 +483,10 @@ Everything visual — textures, belts, nebulae, flares — is invented procedura
 * Distances, radii and belt thickness are compressed — the alternative is an invisible
   simulation. The *distance* compression is a control you can dial: **Distance spread**
   `a^1.00` draws every orbit at its true proportional distance (Mercury at 0.387 ×, Neptune at
-  30.07 × Earth's). Radii and belt thickness stay compressed at every setting: framed so that
-  Neptune's orbit fits the screen, a to-scale Earth is about a thousandth of a pixel.
+  30.07 × Earth's), and the same slider lifts the size ruler with it — bodies stay legible at the
+  compressed end and never grow past 90 % of the innermost orbit at the true end. Radii and belt
+  thickness stay *display* sizes rather than true ones at every setting: framed so that Neptune's
+  orbit fits the screen, a to-scale Earth is about a thousandth of a pixel.
   Inclinations, eccentricities, nodes, perihelia, periods and dates are never compressed.
 * The asteroid belt is a representative swarm, not real asteroid ephemerides.
 * Rendering needs WebGL2 and a CDN round-trip on first load; offline use means vendoring

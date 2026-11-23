@@ -663,7 +663,7 @@
           max="1.00"
           step="0.05"
           value="0.55"
-          aria-label="Orbit radii scale as AU to this power: 0.55 compressed, 1.00 true proportional spacing"
+          aria-label="Orbit radii scale as AU to this power, and body sizes follow it: 0.55 compressed, 1.00 true proportional spacing"
         />
         <div class="ticks">
           <span>0.40</span><span>0.70</span><span>1.00 true</span>
@@ -1159,9 +1159,10 @@
       const auToUnit = (au) => AU_GAIN * Math.pow(au, distPower);
       const unitToAu = (units) =>
         Math.pow(Math.max(1e-6, units) / AU_GAIN, 1 / distPower);
-      const kmToUnit = (km) => 1.25 * Math.pow(km / EARTH_RADIUS_KM, 0.42);
-      /* Asteroids use that same compression rule as the planets — no special boost. */
-      const kmToUnitRaw = kmToUnit;
+      /* Body sizes are a calibrated ruler too, and they FOLLOW the distance spread — so
+         the size law (sizeExp / sizeGain / kmToUnit / rockSize) is defined with the
+         framing reference below, next to the span it tracks. SUN_RADIUS is the star as
+         built at the default spread; body.r is always the live radius. */
       const SUN_RADIUS = 4.6;
 
       /* Real J2000 orbital elements (JPL approximate elements):
@@ -1503,6 +1504,44 @@
       const OUTER_AU = Math.max(...CATALOG.map((c) => c.au));
       const auSpanAt = (power) => AU_GAIN * Math.pow(OUTER_AU, power);
       const SPAN_AT_DEFAULT = auSpanAt(DIST_POWER_DEFAULT);
+      const spanGain = () => auSpanAt(distPower) / SPAN_AT_DEFAULT;
+
+      /* ---------------------- the size law, riding the spread ----------------------
+   Body radii follow the same dial as orbit radii, in three parts, all calibrated so
+   the built setting (a^0.55) reproduces the built look exactly:
+   1. the compression EXPONENT follows the spread, so sliding toward a¹ moves the size
+      ratios toward the truth they were compressed from (at a^1.00 a radius is
+      proportional to its real km, which is what the a¹ claim in the distance law means);
+   2. the whole size RULER rises with the frame the spread forces: framing a true
+      proportional system needs the camera 4.6× further back, and bodies that kept their
+      old radius in units would shrink into pixels out there. The rise is capped by the
+      star fitting inside the innermost orbit — how much room a star has is set by the
+      orbit closest to it, and the spread moves that orbit, so the cap is geometry, not
+      a constant. A size ruler that swallows the system it is sizing has stopped being
+      a ruler;
+   3. belt rubble gets its own track, because the belt is what disappears at a wide
+      spread: it is 2 AU of a 32 AU system, so its band thins faster than the planets.
+   Hierarchy holds at every setting: the star stays the largest disc, and no body's disc
+   approaches the orbit it rides. */
+      const SIZE_EXP_BASE = 0.42; // built compression of radii
+      const SIZE_POWER_TRACK = 0.12; // how much of the spread the exponent follows
+      const SIZE_SPAN_TRACK = 0.3; // how far the ruler rises with the frame
+      const SIZE_FRAME_CAP = 0.9; // star radius as a fraction of the innermost orbit
+      const ROCK_SPAN_TRACK = 0.7; // faceted belt rocks ride the frame harder
+      const BELT_DOT_TRACK = 1; // the point layer is a pixel glyph: fully compensated
+      const INNER_AU = Math.min(...CATALOG.map((c) => c.au));
+      const sizeExp = () =>
+        SIZE_EXP_BASE + (distPower - DIST_POWER_DEFAULT) * SIZE_POWER_TRACK;
+      const sizeGain = () =>
+        Math.min(
+          Math.pow(spanGain(), SIZE_SPAN_TRACK),
+          (SIZE_FRAME_CAP * auToUnit(INNER_AU)) / SUN_RADIUS,
+        );
+      const kmToUnit = (km) =>
+        1.25 * Math.pow(km / EARTH_RADIUS_KM, sizeExp()) * sizeGain();
+      /* asteroids use the planets' rule, plus their own legibility track */
+      const rockSize = (km) =>
+        kmToUnit(km) * ROCK_GAIN * Math.pow(spanGain(), ROCK_SPAN_TRACK);
 
       const SUN_INFO = {
         key: "sun",
@@ -1812,15 +1851,17 @@
         }
 
         if (def.rings) tiltGroup.add(makeRings(r, def.rings));
-        if (def.atmo) pivot.add(makeAtmoShell(r, def.atmo));
+        const atmoShell = def.atmo ? makeAtmoShell(r, def.atmo) : null;
+        if (atmoShell) pivot.add(atmoShell);
 
         let moon = null,
-          moonPivot = null;
+          moonPivot = null,
+          moonR0 = 0;
         if (def.satellite) {
           moonPivot = new THREE.Object3D();
           moonPivot.rotation.x = THREE.MathUtils.degToRad(5.1);
           pivot.add(moonPivot);
-          const mr = kmToUnit(def.satellite.radiusKm) * 0.62;
+          moonR0 = kmToUnit(def.satellite.radiusKm) * 0.62;
           const moonTex = toTexture(
             paintSurface({
               mode: "terra",
@@ -1843,7 +1884,7 @@
             1,
           );
           moon = new THREE.Mesh(
-            new THREE.SphereGeometry(mr, 40, 28),
+            new THREE.SphereGeometry(moonR0, 40, 28),
             new THREE.MeshStandardMaterial({
               map: moonTex,
               bumpMap: moonTex,
@@ -1860,6 +1901,8 @@
           new THREE.MeshBasicMaterial({ visible: false }),
         );
         pivot.add(pick);
+        /* a hit target has its own floor, so it rescales by that law, not blindly */
+        const pickBase = Math.max(2.1, r * 1.9);
 
         const labelEl = document.createElement("div");
         labelEl.className = "label";
@@ -1871,6 +1914,11 @@
           info: def,
           index,
           r,
+          /* the radius this body was BUILT at: applySize() scales its geometry by r/r0,
+             never by rebuilding it, so a spread change costs no geometry work */
+          r0: r,
+          pickBase,
+          atmoShell,
           a,
           orbitGroup,
           pivot,
@@ -2312,7 +2360,7 @@
           sn: Math.sin(node),
           cw: Math.cos(argp),
           sw: Math.sin(argp),
-          rU: kmToUnitRaw(km / 2) * ROCK_GAIN,
+          rU: rockSize(km / 2),
           ax,
           ay,
           az,
@@ -2459,7 +2507,11 @@
         const pxPerUnit =
           (renderer.domElement.height * 0.5) /
           Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5);
-        beltMat.uniforms.uScale.value = renderer.domElement.height * 0.5;
+        /* the point layer is a legibility glyph rather than a body: at a¹ the camera it
+           draws under is 4.6× further back, so the glyph rises with the frame the spread
+           forces instead of thinning the belt into a hairline */
+        beltMat.uniforms.uScale.value =
+          renderer.domElement.height * 0.5 * Math.pow(spanGain(), BELT_DOT_TRACK);
         const cx = camera.position.x,
           cy = camera.position.y,
           cz = camera.position.z;
@@ -2806,7 +2858,7 @@
       }
 
       function buildRock(def) {
-        const rU = kmToUnitRaw(def.radiusKm) * ROCK_GAIN;
+        const rU = rockSize(def.radiusKm);
         const periodDays = DAYS_PER_YEAR * Math.pow(def.au, 1.5);
         def.periodDays = periodDays; // updateBodies() propagates them like planets
         const incRad = deg2rad(def.inc);
@@ -2861,6 +2913,7 @@
           new THREE.MeshBasicMaterial({ visible: false }),
         );
         pivot.add(pick);
+        const pickBase = Math.max(1.8, rU * 2.6);
 
         const lbl = makeLabel(def.name, def.hex);
         const body = {
@@ -2869,6 +2922,8 @@
           info: { ...def, periodDays },
           index: bodies.length,
           r: rU,
+          r0: rU,
+          pickBase,
           a,
           orbitGroup,
           pivot,
@@ -3144,7 +3199,7 @@
         following = body;
         MIN_DIST = Math.max(2.0, body.r * 3.2);
         cam.dist = clamp(
-          body.isSun ? SUN_RADIUS * 16 : body.r * 9 + 4,
+          body.isSun ? body.r * 16 : body.r * 9 + 4,
           MIN_DIST + 2,
           MAX_DIST,
         );
@@ -3302,7 +3357,32 @@
             ? "inclinations true"
             : `inclinations exaggerated ${tiltScale}× so each tilted plane reads against the ecliptic grid · true values are 0–7°` +
               (tiltScale > 4 ? " · belt rocks capped at 4×" : "");
-        scaleNoteEl.textContent = `radii compressed for visibility · ${spread} · Earth's orbit pinned at 18 u · ${tilt} · orbits solved from real J2000 elements (a, e, i, Ω, ω, M₀)`;
+        scaleNoteEl.textContent = `radii compressed for visibility · ${spread} · body sizes follow the spread (km^${sizeExp().toFixed(2)}, ruler ${sizeGain().toFixed(2)}×) · Earth's orbit pinned at 18 u · ${tilt} · orbits solved from real J2000 elements (a, e, i, Ω, ω, M₀)`;
+      }
+
+      /* Sizes ride the spread. Each body's geometry is built once, at the built radius,
+         so a spread change rescales that body's own group by r / r0 — the orbit, the tilt
+         and the AU readout are untouched; only the size ruler moves. */
+      const pickLaw = (b, r) =>
+        b.isRock ? Math.max(1.8, r * 2.6) : Math.max(2.1, r * 1.9);
+      function applySize(b) {
+        if (b.isSun) {
+          /* the star's limb shell, glows, prominences and pick are all children of
+             sunGroup, so one group scale moves the whole display of the star */
+          const g = sizeGain();
+          sunGroup.scale.setScalar(g);
+          b.r = SUN_RADIUS * g;
+          return;
+        }
+        const r = b.isRock ? rockSize(b.def.radiusKm) : kmToUnit(b.def.radiusKm);
+        b.r = r;
+        const f = r / b.r0;
+        b.tiltGroup.scale.setScalar(f); // disc, clouds, rings, faceted rock
+        if (b.atmoShell) b.atmoShell.scale.setScalar(f);
+        /* the moon rides its own pivot, outside the tilted disc group: scaling the pivot
+           grows the Earth-Moon system as a system - disc, moon, and their separation */
+        if (b.moonPivot) b.moonPivot.scale.setScalar(f);
+        if (b.pick) b.pick.scale.setScalar(pickLaw(b, r) / b.pickBase);
       }
 
       function setDistancePower(power) {
@@ -3315,22 +3395,35 @@
         distPower = parseFloat(next.toFixed(2));
         spreadInput.value = String(distPower); // stays in sync with [ ] nudges
 
+        const rideBefore = following ? following.r : 0;
+
         for (const b of bodies) {
-          if (b.isSun) continue;
-          b.a = auToUnit(b.def.au);
-          repaintOrbit(b);
+          if (!b.isSun) {
+            b.a = auToUnit(b.def.au);
+            repaintOrbit(b);
+          }
+          applySize(b);
         }
-        for (const m of beltMeta) m.radius = auToUnit(m.au);
+        for (const m of beltMeta) {
+          m.radius = auToUnit(m.au); // belt orbits: the distance law, unchanged
+          m.rU = rockSize(m.km / 2); // belt rubble: the size law riding it
+        }
         sizeEclipticGrid(auToUnit(OUTER_AU) * GRID_SPAN_RATIO);
         updateBodies();
         updateBelt(days);
 
         /* In overview the camera sits at a fixed fraction of the outer orbit, so it keeps
      the same framing of the system at any spread instead of drifting out of frame.
-     When riding a body, the distance is relative to that body's own radius — which
-     this setting does not change — so the camera is left alone. */
-        const ratio = auSpanAt(distPower) / SPAN_AT_DEFAULT;
-        if (!following) {
+     When riding a body the distance is relative to that body's own radius — and this
+     setting moves that radius, so the ride is scaled by the same factor to keep the
+     same framing of the body you are following. */
+        const ratio = spanGain();
+        if (following) {
+          const f = following.r / rideBefore;
+          cam.dist = clamp(cam.dist * f, MIN_DIST + 2, MAX_DIST);
+          camSmooth.dist = clamp(camSmooth.dist * f, MIN_DIST, MAX_DIST);
+          MIN_DIST = Math.max(2.0, following.r * 3.2);
+        } else {
           const step = ratio / spanRatio;
           cam.dist = clamp(cam.dist * step, MIN_DIST + 2, MAX_DIST);
           camSmooth.dist = clamp(camSmooth.dist * step, MIN_DIST, MAX_DIST);

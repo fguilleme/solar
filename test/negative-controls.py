@@ -39,80 +39,115 @@ class BadPatch(Exception):
 # name -> (harness, [(old, new), ...])
 # name -> (harness, [(old, new), ...]).  Every `old` is an exact snippet of index.html
 # and must appear exactly once — the script refuses to run a variant that does not match.
-PLANET_PLANE = """  const orbitGroup = new THREE.Group();
-  orbitGroup.rotation.order = 'YXZ';
-  orbitGroup.rotation.y = deg2rad(def.node);
-  orbitGroup.rotation.x = incRad * tiltScale;
-  scene.add(orbitGroup);
+PLANET_PLANE = """        const orbitGroup = new THREE.Group();
+        orbitGroup.rotation.order = "YXZ";
+        orbitGroup.rotation.y = deg2rad(def.node);
+        orbitGroup.rotation.x = incRad * tiltScale;
+        scene.add(orbitGroup);
 
-  const pts = [];"""
+        const pts = [];"""
 
 VARIANTS = {
     # --- orbital orientation ---------------------------------------------------
     "planet-roll-added": ("selftest.js", [
         (PLANET_PLANE,
          PLANET_PLANE.replace("orbitGroup.rotation.x = incRad * tiltScale;",
-                             "orbitGroup.rotation.x = incRad * tiltScale;\n  orbitGroup.rotation.z = def.node * 0.5;   /* NEGATIVE CONTROL: arbitrary per-planet roll */")),
+                             "orbitGroup.rotation.x = incRad * tiltScale;\n        orbitGroup.rotation.z = def.node * 0.5;   /* NEGATIVE CONTROL: arbitrary per-planet roll */")),
     ]),
     "node-applied-before-tilt": ("selftest.js", [
         (PLANET_PLANE,
-         PLANET_PLANE.replace("orbitGroup.rotation.order = 'YXZ';",
-                              "orbitGroup.rotation.order = 'XYZ';   /* NEGATIVE CONTROL: node applied before the tilt */")),
+         PLANET_PLANE.replace('orbitGroup.rotation.order = "YXZ";',
+                              'orbitGroup.rotation.order = "XYZ";   /* NEGATIVE CONTROL: node applied before the tilt */')),
     ]),
     # --- the asteroid belt -----------------------------------------------------
     "belt-inclinations-zeroed": ("selftest.js", [
-        ("  let ecc = 0.010 + Math.pow(beltRand(), 1.35) * 0.19, incDeg = Math.pow(beltRand(), 1.70) * 11.5;",
-         "  let ecc = 0.010 + Math.pow(beltRand(), 1.35) * 0.19, incDeg = 0;   /* NEGATIVE CONTROL: belt inclinations flattened */"),
-        ("    incDeg += g.pump * f;                // ... and the tilted ones",
-         "    incDeg += 0;                         // NEGATIVE CONTROL: resonant tilt pumping removed"),
+        ("          ecc += g.ecc * f; // resonant rocks are the eccentric ones\n          incDeg += g.pump * f; // ... and the tilted ones",
+         "          ecc += g.ecc * f; // resonant rocks are the eccentric ones\n          incDeg += 0; // NEGATIVE CONTROL: belt inclinations flattened"),
     ]),
     "one-shared-belt-node": ("selftest.js", [
-        ("  const inc = deg2rad(incDeg), node = beltRand() * TAU, argp = beltRand() * TAU;",
-         "  const inc = deg2rad(incDeg), node = 0.3, argp = beltRand() * TAU;   /* NEGATIVE CONTROL: every rock shares one ascending node */"),
+        ("        const inc = deg2rad(incDeg),\n          node = beltRand() * TAU,\n          argp = beltRand() * TAU;",
+         "        const inc = deg2rad(incDeg),\n          node = 0.3, // NEGATIVE CONTROL: every rock shares one ascending node\n          argp = beltRand() * TAU;"),
     ]),
     "belt-tilt-clamp-removed": ("selftest.js", [
         ("  const k = Math.min(tiltScale, 4);",
          "  const k = tiltScale;   /* NEGATIVE CONTROL: no 4x cap on the rocks */"),
     ]),
     "belt-ignores-spread": ("selftest.js", [
-        ("  for (const m of beltMeta) m.radius = auToUnit(m.au);",
-         "  for (const m of beltMeta) m.radius = AU_GAIN * Math.pow(m.au, DIST_POWER_DEFAULT);   /* NEGATIVE CONTROL: belt stuck at the default law */"),
+        ("        for (const m of beltMeta) {\n          m.radius = auToUnit(m.au); // belt orbits: the distance law, unchanged",
+         "        for (const m of beltMeta) {\n          m.radius = AU_GAIN * Math.pow(m.au, DIST_POWER_DEFAULT); // NEGATIVE CONTROL: belt stuck at the default law"),
     ]),
     # --- distance spread -------------------------------------------------------
     "readout-only-spread": ("selftest.js", [
-        ("const auToUnit = au => AU_GAIN * Math.pow(au, distPower);",
-         "const auToUnit = au => AU_GAIN * Math.pow(au, DIST_POWER_DEFAULT);   /* NEGATIVE CONTROL: the slider only changes the label */"),
+        ("const auToUnit = (au) => AU_GAIN * Math.pow(au, distPower);",
+         "const auToUnit = (au) => AU_GAIN * Math.pow(au, DIST_POWER_DEFAULT);   /* NEGATIVE CONTROL: the slider only changes the label */"),
     ]),
     "stretched-not-resolved": ("selftest.js", [
-        ("    b.a = auToUnit(b.def.au);\n    repaintOrbit(b);",
-         "    b.a = auToUnit(b.def.au);   /* NEGATIVE CONTROL: new semi-major axis, drawn ellipse never re-solved */"),
+        ("            b.a = auToUnit(b.def.au);\n            repaintOrbit(b);",
+         "            b.a = auToUnit(b.def.au);   /* NEGATIVE CONTROL: new semi-major axis, drawn ellipse never re-solved */"),
     ]),
     "camera-left-behind": ("selftest.js", [
-        ("  const ratio = auSpanAt(distPower) / SPAN_AT_DEFAULT;",
-         "  const ratio = 1;   /* NEGATIVE CONTROL: camera never adjusts to the new span */"),
+        ("        const ratio = spanGain();",
+         "        const ratio = 1;   /* NEGATIVE CONTROL: camera never adjusts to the new span */"),
     ]),
     "spread-touches-angles": ("selftest.js", [
-        ("    b.a = auToUnit(b.def.au);\n    repaintOrbit(b);",
-         "    b.orbitGroup.rotation.z += distPower - DIST_POWER_DEFAULT;   /* NEGATIVE CONTROL: the spread drags the orbital planes */\n    b.a = auToUnit(b.def.au);\n    repaintOrbit(b);"),
+        ("            b.a = auToUnit(b.def.au);\n            repaintOrbit(b);",
+         "            b.orbitGroup.rotation.z += distPower - DIST_POWER_DEFAULT;   /* NEGATIVE CONTROL: the spread drags the orbital planes */\n            b.a = auToUnit(b.def.au);\n            repaintOrbit(b);"),
     ]),
     "reset-ignores-spread": ("selftest.js", [
-        ("cam.az = 2.35; cam.pol = 1.06; cam.dist = 210 * spanRatio;",
-         "cam.az = 2.35; cam.pol = 1.06; cam.dist = 210;   /* NEGATIVE CONTROL: fixed overview distance */"),
+        ("        cam.dist = 210 * spanRatio;",
+         "        cam.dist = 210;   /* NEGATIVE CONTROL: fixed overview distance */"),
     ]),
     "grid-ignores-spread": ("selftest.js", [
-        ("  for (const m of beltMeta) m.radius = auToUnit(m.au);\n  sizeEclipticGrid(auToUnit(OUTER_AU) * GRID_SPAN_RATIO);",
-         "  for (const m of beltMeta) m.radius = auToUnit(m.au);\n  sizeEclipticGrid(SPAN_AT_DEFAULT * GRID_SPAN_RATIO);   /* NEGATIVE CONTROL: the grid keeps its default size */"),
+        ("        sizeEclipticGrid(auToUnit(OUTER_AU) * GRID_SPAN_RATIO);",
+         "        sizeEclipticGrid(SPAN_AT_DEFAULT * GRID_SPAN_RATIO);   /* NEGATIVE CONTROL: the grid keeps its default size */"),
     ]),
     "readout-hard-coded-power": ("selftest.js", [
-        ("const unitToAu = units => Math.pow(Math.max(1e-6, units) / AU_GAIN, 1 / distPower);",
-         "const unitToAu = units => Math.pow(Math.max(1e-6, units) / AU_GAIN, 1 / DIST_POWER_DEFAULT);   /* NEGATIVE CONTROL: inverted with the old exponent */"),
+        ("const unitToAu = (units) =>\n        Math.pow(Math.max(1e-6, units) / AU_GAIN, 1 / distPower);",
+         "const unitToAu = (units) =>\n        Math.pow(Math.max(1e-6, units) / AU_GAIN, 1 / DIST_POWER_DEFAULT);   /* NEGATIVE CONTROL: inverted with the old exponent */"),
+    ]),
+    # --- the size ruler that rides the spread -----------------------------------
+    "size-exponent-ignores-spread": ("selftest.js", [
+        ("      const sizeExp = () =>\n        SIZE_EXP_BASE + (distPower - DIST_POWER_DEFAULT) * SIZE_POWER_TRACK;",
+         "      const sizeExp = () => SIZE_EXP_BASE;   /* NEGATIVE CONTROL: the km law never leans toward the true ratio */"),
+    ]),
+    "ruler-height-ignores-spread": ("selftest.js", [
+        ("      const sizeGain = () =>\n        Math.min(\n          Math.pow(spanGain(), SIZE_SPAN_TRACK),\n          (SIZE_FRAME_CAP * auToUnit(INNER_AU)) / SUN_RADIUS,\n        );",
+         "      const sizeGain = () => 1;   /* NEGATIVE CONTROL: the ruler stands at one height whatever the spread */"),
+    ]),
+    "sizes-computed-never-applied": ("selftest.js", [
+        ("          applySize(b);",
+         "          /* NEGATIVE CONTROL: the new ruler is computed, the geometry is left as built */"),
+    ]),
+    "star-cap-removed": ("selftest.js", [
+        ("      const SIZE_FRAME_CAP = 0.9; // star radius as a fraction of the innermost orbit",
+         "      const SIZE_FRAME_CAP = 1.4; // NEGATIVE CONTROL: the star may overrun the innermost orbit"),
+    ]),
+    "sun-display-frozen": ("selftest.js", [
+        ("          sunGroup.scale.setScalar(g);",
+         "          sunGroup.scale.setScalar(1);   /* NEGATIVE CONTROL: the star's own size ignores the ruler */"),
+    ]),
+    "belt-rubble-ignores-spread": ("selftest.js", [
+        ("          m.rU = rockSize(m.km / 2); // belt rubble: the size law riding it",
+         "          m.rU = 1.25 * Math.pow(m.km / 2 / EARTH_RADIUS_KM, 0.42) * ROCK_GAIN; // NEGATIVE CONTROL: rubble frozen"),
+    ]),
+    "belt-dots-ignore-frame": ("selftest.js", [
+        ("        beltMat.uniforms.uScale.value =\n          renderer.domElement.height * 0.5 * Math.pow(spanGain(), BELT_DOT_TRACK);",
+         "        beltMat.uniforms.uScale.value =\n          renderer.domElement.height * 0.5;   /* NEGATIVE CONTROL: the point layer thins out at a¹ */"),
+    ]),
+    "moon-system-frozen": ("selftest.js", [
+        ("        if (b.moonPivot) b.moonPivot.scale.setScalar(f);",
+         "        if (b.moonPivot) b.moonPivot.scale.setScalar(1);   /* NEGATIVE CONTROL: the Moon keeps its built distance */"),
+    ]),
+    "ride-not-rescaled": ("selftest.js", [
+        ("          const f = following.r / rideBefore;",
+         "          const f = 1;   /* NEGATIVE CONTROL: the ride ignores the radius it moved */"),
     ]),
     # --- labels ----------------------------------------------------------------
     "label-exemptions-removed": ("labeltest.js", [
-        ("      if (!clashes || c.rank) { placed = s; break; }",
-         "      if (!clashes) { placed = s; break; }   /* NEGATIVE CONTROL: no exemption */"),
-        ("      prio: rank * 1e9 + screenR * 1000 + (b.isSun ? 500 : 0) });",
-         "      prio: screenR * 1000 + (b.isSun ? 500 : 0) });   /* NEGATIVE CONTROL: hovered/selected no longer sorted first */"),
+        ("            if (!clashes || c.rank) {\n              placed = s;\n              break;\n            }",
+         "            if (!clashes) {\n              placed = s;\n              break;\n            }   /* NEGATIVE CONTROL: no exemption */"),
+        ("            prio: rank * 1e9 + screenR * 1000 + (b.isSun ? 500 : 0),\n          });",
+         "            prio: screenR * 1000 + (b.isSun ? 500 : 0),\n          });   /* NEGATIVE CONTROL: hovered/selected no longer sorted first */"),
     ]),
 }
 

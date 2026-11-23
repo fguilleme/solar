@@ -571,6 +571,140 @@ setTimeout(() => {
     ok('no angle of any orbit moves with the spread', dirDrift < 1e-12 && planeDrift < 1e-12,
        'directions and orbit planes identical before and after: ' + dirDrift.toExponential(1) + ' / ' + planeDrift.toExponential(1));
 
+    /* ---- the size ruler rides the same dial -------------------------------
+       Radii are a second calibrated ruler, and the setting moves it too: the km law
+       keeps its exponent 0.42 at the built spread and leans toward the true ratio as
+       the spread opens, while the whole ruler rises with the frame (span^0.3). Two
+       ceilings hold the picture: the star stays inside the innermost orbit, and the
+       star stays the largest disc. Every expectation below is re-derived from the raw
+       calibration numbers (18 u per au, 4.6 u for the star, km^0.42, 6 371 km), never
+       from the page's own size functions, because a bug in a law agrees with itself. */
+    const R_KM = 6371, R_GAIN = 1.25, R_EXP = 0.42, R_EXP_TRACK = 0.12,
+          R_RULER = 0.3, R_STAR_CAP = 0.9, R_STAR_UNITS = 4.6, R_ROCK_GAIN = 1.8;
+    const spanGainAt = p => Math.pow(outerAu, p) / Math.pow(outerAu, DIST_POWER_DEFAULT);
+    const rulerAt = p => Math.min(Math.pow(spanGainAt(p), R_RULER),
+                                  (R_STAR_CAP * 18 * Math.pow(mercuryB.def.au, p)) / R_STAR_UNITS);
+    const sizeAt = (km, p) => R_GAIN * Math.pow(km / R_KM, R_EXP + (p - DIST_POWER_DEFAULT) * R_EXP_TRACK) * rulerAt(p);
+    const rockAt = (km, p) => sizeAt(km, p) * R_ROCK_GAIN * Math.pow(spanGainAt(p), 0.7);
+    const sunB = bodies.find(b => b.isSun);
+    const namedRocks = bodies.filter(b => b.isRock);
+    const meanRubble = () => beltMeta.reduce((s, m) => s + m.rU, 0) / beltMeta.length;
+
+    setDistancePower(DIST_POWER_DEFAULT);
+    let builtLaw = 0;
+    for (const b of bodies) if (!b.isSun)
+      builtLaw = Math.max(builtLaw, Math.abs(b.r / (b.isRock ? 1.8 : 1) / (1.25 * Math.pow(b.def.radiusKm / 6371, 0.42)) - 1));
+    ok('the built size ruler is the documented km^0.42 ruler',
+       builtLaw < 1e-12 && sunB.r === 4.6 && sunGroup.scale.x === 1,
+       'every disc within ' + builtLaw.toExponential(1) + ' of 1.25\u00b7(km/6371)^0.42, star ' + sunB.r.toFixed(1)
+       + ' u, ' + namedRocks.length + ' named rocks at 1.8\u00d7 that law');
+
+    const sized = {};
+    const __mp = new THREE.Vector3(), __mc = new THREE.Vector3(), __ws = new THREE.Vector3();
+    for (const p of POWERS) {
+      setDistancePower(p);
+      scene.updateMatrixWorld(true);
+      let worstLaw = 0, tightestOrbitOverDisc = Infinity, largestPlanet = 0, widestRockOverShell = 0;
+      for (const b of bodies) {
+        if (b.isSun) continue;
+        const want = b.isRock ? rockAt(b.def.radiusKm, p) : sizeAt(b.def.radiusKm, p);
+        worstLaw = Math.max(worstLaw, Math.abs(b.r / want - 1));
+        tightestOrbitOverDisc = Math.min(tightestOrbitOverDisc, b.a / b.r);
+        largestPlanet = Math.max(largestPlanet, b.r);
+      }
+      for (const m of beltMeta) widestRockOverShell = Math.max(widestRockOverShell, m.rU / m.radius);
+      earth.pivot.getWorldPosition(__mp);
+      earth.moon.getWorldPosition(__mc);
+      const moonR = earth.moon.getWorldScale(__ws).x * earth.moon.geometry.parameters.radius;
+      sized[key(p)] = {
+        law: worstLaw,
+        jup: jupiter.r,
+        sunR: sunB.r,
+        sunShown: sunMesh.getWorldScale(__ws).x * sunMesh.geometry.parameters.radius,
+        jupShown: jupiter.mesh.getWorldScale(__ws).x * jupiter.mesh.geometry.parameters.radius,
+        ceres: (namedRocks.find(b => b.def.name === 'Ceres') || namedRocks[0]).r,
+        rubble: meanRubble(),
+        planetOverStar: largestPlanet / sunB.r,
+        starOverInnerOrbit: sunB.r / lawUnits(mercuryB.def.au, p),
+        orbitOverDisc: tightestOrbitOverDisc,
+        rockOverShell: widestRockOverShell,
+        dots: beltMat.uniforms.uScale.value / (renderer.domElement.height * 0.5),
+        note: scaleNoteEl.textContent,
+        moonRatio: earth.moonPivot.scale.x / earth.tiltGroup.scale.x,
+        moonClear: __mc.distanceTo(__mp) - moonR - earth.r,
+      };
+    }
+    setDistancePower(DIST_POWER_DEFAULT);
+
+    ok('every body\u2019s radius follows the size law the spread sets',
+       POWERS.every(p => sized[key(p)].law < 1e-9),
+       POWERS.map(p => 'a^' + key(p) + ' worst disc vs law ' + sized[key(p)].law.toExponential(1)
+         + ' (Jupiter ' + sized[key(p)].jup.toFixed(2) + ' u, Ceres ' + sized[key(p)].ceres.toFixed(2) + ' u)').join(' \u00b7 '));
+
+    ok('the size ruler rises with the spread instead of being left behind by the frame',
+       POWERS.every((p, i) => i === 0 || sized[key(p)].jup > sized[key(POWERS[i - 1])].jup * 1.02) &&
+       sized['1.00'].jup / sized['0.55'].jup > 1.15 &&
+       sized['1.00'].rubble / sized['0.55'].rubble > 1.5 &&
+       sized['1.00'].ceres > sized['0.55'].ceres,
+       'Jupiter ' + sized['0.40'].jup.toFixed(2) + ' \u2192 ' + sized['0.55'].jup.toFixed(2) + ' \u2192 '
+       + sized['1.00'].jup.toFixed(2) + ' u, mean belt rock ' + sized['0.55'].rubble.toFixed(3) + ' \u2192 '
+       + sized['1.00'].rubble.toFixed(3) + ' u, Ceres ' + sized['0.55'].ceres.toFixed(2) + ' \u2192 '
+       + sized['1.00'].ceres.toFixed(2) + ' u as the spread opens a^0.55 \u2192 a^1.00');
+
+    ok('the discs drawn are the discs the ruler claims',
+       POWERS.every(p => Math.abs(sized[key(p)].sunShown / sized[key(p)].sunR - 1) < 1e-6 &&
+                         Math.abs(sized[key(p)].jupShown / sized[key(p)].jup - 1) < 1e-6),
+       POWERS.map(p => 'a^' + key(p) + ' star mesh ' + sized[key(p)].sunShown.toFixed(2)
+         + ' u vs ' + sized[key(p)].sunR.toFixed(2) + ' u claimed, Jupiter mesh '
+         + sized[key(p)].jupShown.toFixed(2) + ' u vs ' + sized[key(p)].jup.toFixed(2)).join(' \u00b7 '));
+
+    ok('the star stays the largest disc at every spread',
+       POWERS.every(p => sized[key(p)].planetOverStar < 0.95),
+       POWERS.map(p => 'a^' + key(p) + ' largest planet / star ' + sized[key(p)].planetOverStar.toFixed(3)).join(' \u00b7 '));
+
+    ok('the star never swallows the orbit its planets ride',
+       POWERS.every(p => sized[key(p)].starOverInnerOrbit <= 0.9 + 1e-9 && sized[key(p)].starOverInnerOrbit < 1),
+       POWERS.map(p => 'a^' + key(p) + ' star ' + (sized[key(p)].starOverInnerOrbit * 100).toFixed(1)
+         + '% of Mercury\u2019s orbit').join(' \u00b7 '));
+
+    ok('no disc approaches the orbit it rides',
+       POWERS.every(p => sized[key(p)].orbitOverDisc > 5) && sized['1.00'].rockOverShell < 0.05,
+       POWERS.map(p => 'a^' + key(p) + ' tightest orbit/disc ' + sized[key(p)].orbitOverDisc.toFixed(1)
+         + '\u00d7, widest belt rock ' + (sized[key(p)].rockOverShell * 100).toFixed(2) + '% of its shell').join(' \u00b7 '));
+
+    ok('the belt point layer is compensated for the camera the spread forces',
+       POWERS.every(p => Math.abs(sized[key(p)].dots / spanGainAt(p) - 1) < 0.02),
+       POWERS.map(p => 'a^' + key(p) + ' glyph scale ' + sized[key(p)].dots.toFixed(2)
+         + '\u00d7 screen height, camera pulled back ' + spanGainAt(p).toFixed(2) + '\u00d7').join(' \u00b7 '));
+
+    ok('the Earth-Moon system grows as a system',
+       POWERS.every(p => Math.abs(sized[key(p)].moonRatio - 1) < 1e-9 && sized[key(p)].moonClear > 0.25),
+       POWERS.map(p => 'a^' + key(p) + ' moon pivot ' + sized[key(p)].moonRatio.toFixed(3)
+         + '\u00d7 the disc group, moon clears Earth by ' + sized[key(p)].moonClear.toFixed(2) + ' u').join(' \u00b7 '));
+
+    ok('the scale note states the live size law',
+       POWERS.every(p => {
+         const m = /km\^(\d\.\d+), ruler (\d\.\d+)\u00d7/.exec(sized[key(p)].note);
+         return m && Math.abs(parseFloat(m[1]) - (0.42 + (p - 0.55) * 0.12)) < 0.011 &&
+                Math.abs(parseFloat(m[2]) - rulerAt(p)) < 0.011;
+       }),
+       POWERS.map(p => 'a^' + key(p) + ' "' + (/body sizes follow the spread \([^)]*\)/.exec(sized[key(p)].note) || ['not stated'])[0] + '"]').join(' \u00b7 '));
+
+    /* Riding a body: the camera sits at a multiple of that body's own radius, and this
+       setting moves that radius. The ride has to scale with it, not leave you inside the
+       planet you are following. */
+    setDistancePower(DIST_POWER_DEFAULT);
+    startFollowing(jupiter);
+    const rideBefore = cam.dist / jupiter.r;
+    setDistancePower(DIST_POWER_MAX);
+    for (let i = 0; i < 30; i++) updateCamera(0.016);
+    const rideAfter = cam.dist / jupiter.r;
+    ok('riding a body keeps its framing when the ruler rises',
+       Math.abs(rideAfter / rideBefore - 1) < 0.03 && cam.dist > MIN_DIST,
+       'camera ' + rideBefore.toFixed(2) + '\u00d7 Jupiter radius before, ' + rideAfter.toFixed(2)
+       + '\u00d7 after (radius ' + sized['0.55'].jup.toFixed(2) + ' \u2192 ' + sized['1.00'].jup.toFixed(2)
+       + ' u, MIN_DIST ' + MIN_DIST.toFixed(1) + ')');
+    stopFollowing();
     setDistancePower(DIST_POWER_DEFAULT);
     for (let i = 0; i < 2; i++) window.dispatchEvent(new KeyboardEvent('keydown', { key: ']', bubbles: true }));
     ok('] opens the spread one step', distPower === 0.65 && parseFloat(spreadInput.value) === 0.65 &&
