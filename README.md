@@ -253,9 +253,12 @@ and the **follow camera**, which multiplies its distance by the body's own growt
 riding Jupiter and then opening the spread keeps the same framing of Jupiter instead of diving
 into it.
 
-At the extreme, holding the default framing at `a^1.00` wants a camera at 1 134 units and
-`MAX_DIST 1100` clamps it: at the far end of the slider Neptune sits a whisker outside the default
-overview (1 094 of the 1 134 of a frame reach) and the wheel takes you the rest of the way.
+**The framing rides it too.** The overview camera is re-derived from the span at every setting —
+126 / 210 / 350 / 971 u across the slider, always exactly 1.795 × Neptune's orbit radius, and the
+outer orbit projects to the same 1.219 half-frames of the viewport at every spread (`the view you
+are looking at survives a spread change` checks the projection, not the ratio). `MAX_DIST 1100`
+never binds on the slider; the wheel can push you out past Neptune at the wide end, and `MIN_DIST 9`
+holds in the free view (riding a body raises it to `body.r × 3.2` so you cannot zoom inside it).
 
 ---
 

@@ -522,11 +522,16 @@ setTimeout(() => {
       framed[p.toFixed(2)] = { reach: __frameReach(outerB), fit: cam.dist / auToUnit(outerAu), dist: cam.dist };
     }
     const reaches = Object.values(framed).map(f => f.reach), fits = Object.values(framed).map(f => f.fit);
+    const distances = Object.values(framed).map(f => f.dist);
+    /* The framing has to stay inside what the wheel can reach: if the slider ever wanted a
+       camera beyond MAX_DIST, the overview would no longer be the overview. */
     ok('the view you are looking at survives a spread change',
        Math.max(...reaches) - Math.min(...reaches) < 0.02 &&
-       Math.max(...fits) - Math.min(...fits) < 1e-6,
+       Math.max(...fits) - Math.min(...fits) < 1e-6 &&
+       Math.max(...distances) <= MAX_DIST,
        Object.keys(framed).map(k => 'a^' + k + ' cam ' + framed[k].dist.toFixed(0)).join(' · ') +
-       ' \u00b7 outer orbit reaches ' + reaches.map(r => r.toFixed(2)).join(' / ') + ' of the frame');
+       ' \u00b7 outer orbit reaches ' + reaches.map(r => r.toFixed(2)).join(' / ') + ' of the frame' +
+       ' \u00b7 widest framing ' + Math.max(...distances).toFixed(0) + ' u against a wheel range of ' + MAX_DIST);
 
     /* Park the overview camera at a fixed 300 units from the Sun at every spread and
        read what the head-up display claims in AU. The expectation is computed here from
