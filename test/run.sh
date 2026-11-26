@@ -81,12 +81,17 @@ if i < 0: print('  no results block'); sys.exit(1)
 data = json.loads(txt[i + 7:])
 bad = 0
 for v in data:
-    ok = not v['overlaps'] and not v['outside'] and not v.get('mustHave')
+    bad_name = v.get('bad') or []
+    deg = v.get('degenerate') or []
+    ok = not v['overlaps'] and not v['outside'] and not v.get('mustHave') and not bad_name and not deg
     bad += 0 if ok else 1
-    print('  %-28s visible %-6s overlaps %-2s outside %s%s' %
+    print('  %-28s visible %-6s overlaps %-2s outside %-4s tags: %d touching, %d led (%d reticled)%s' %
           (v['tag'], v['visible'], v['overlaps'], v['outside'] or '—',
+           v.get('touching', 0), v.get('led', 0), v.get('marked', 0),
            ('  MUST HAVE ' + ','.join(v['mustHave'])) if v.get('mustHave') else ''))
-    if ok is False: print('    names: ' + v['names'])
+    if ok is False:
+        if v['names']: print('    names: ' + v['names'])
+        for note in deg + bad_name: print('    untied: ' + note)
 print('  views %d · broken %d' % (len(data), bad))
 sys.exit(1 if bad else 0)
 PY

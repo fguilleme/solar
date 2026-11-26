@@ -113,8 +113,10 @@
         width: 7px;
         height: 7px;
         border-radius: 50%;
-        background: #fff;
-        box-shadow: 0 0 10px currentColor;
+        /* a hollow key, not a point of light: at distance every body IS a glowing dot, and
+           a glowing dot inside a tag is read as a planet that is not on its orbit */
+        border: 1.5px solid currentColor;
+        background: transparent;
         flex: 0 0 auto;
       }
       .label.compact {
@@ -124,9 +126,32 @@
         letter-spacing: 0.05em;
       }
       .label.compact i {
-        width: 4px;
-        height: 4px;
-        box-shadow: 0 0 6px currentColor;
+        width: 5px;
+        height: 5px;
+        border-width: 1px;
+      }
+      /* A label is a tag, not the object it names. Once a body is smaller than a pixel the
+         only bright thing on screen is its glow, and a tag 20-40px away then reads as a planet
+         parked off its own orbit. So the tag carries a leader to the position it means, and the
+         position carries a reticle: filled point of light = the body, ring = exactly where it
+         is, hairline = which tag belongs to it. */
+      .mark,
+      .lead {
+        position: absolute;
+        left: 0;
+        top: 0;
+        opacity: 0;
+        transition: opacity 0.25s;
+        pointer-events: none;
+      }
+      .mark {
+        border: 1px solid;
+        border-radius: 50%;
+      }
+      .lead {
+        height: 0;
+        border-top: 1px solid;
+        transform-origin: 0 0;
       }
 
       /* ---------- control panel ---------- */
@@ -1507,41 +1532,142 @@
       const spanGain = () => auSpanAt(distPower) / SPAN_AT_DEFAULT;
 
       /* ---------------------- the size law, riding the spread ----------------------
-   Body radii follow the same dial as orbit radii, in three parts, all calibrated so
-   the built setting (a^0.55) reproduces the built look exactly:
-   1. the compression EXPONENT follows the spread, so sliding toward a¹ moves the size
-      ratios toward the truth they were compressed from (at a^1.00 a radius is
-      proportional to its real km, which is what the a¹ claim in the distance law means);
-   2. the whole size RULER rises with the frame the spread forces: framing a true
-      proportional system needs the camera 4.6× further back, and bodies that kept their
-      old radius in units would shrink into pixels out there. The rise is capped by the
-      star fitting inside the innermost orbit — how much room a star has is set by the
-      orbit closest to it, and the spread moves that orbit, so the cap is geometry, not
-      a constant. A size ruler that swallows the system it is sizing has stopped being
-      a ruler;
-   3. belt rubble gets its own track, because the belt is what disappears at a wide
-      spread: it is 2 AU of a 32 AU system, so its band thins faster than the planets.
-   Hierarchy holds at every setting: the star stays the largest disc, and no body's disc
-   approaches the orbit it rides. */
+   Body radii ride the same dial as orbit radii, and the dial runs from a legible display
+   ruler to the honest one. Two rulers, blended geometrically by how far the dial is into
+   its true half (w = 0 at the built a^0.55, w = 1 at a^1.00):
+
+     DISPLAY RULER  1.25 · (km/6371)^0.42 · spanGain^0.3   the built look: compressed, and
+                    rising with the frame the spread forces, capped so the star fits inside
+                    the innermost orbit
+     TRUE RULER     18 · (km / 149 597 870.7)^p            the orbit ruler applied to
+                    kilometres — at a^1.00 every radius is its real radius in the units its
+                    orbit is measured in: the star 0.084 u against Neptune at 541 u
+
+   kmToUnit(km) = display^(1-w) · true^w. Blending two power laws geometrically gives a
+   power law, so this is one ruler at every setting: exactly the built ruler at a^0.55 and
+   exactly the honest one at a^1.00. Compressing inflates bodies as it squeezes orbits; the
+   true end deflates them to what they are. The rock bonus and the star fix are display
+   fudges too, so they fade at the same rate — at a^1.00 nothing about a radius is a fudge.
+
+   The point-source layer below is what makes the honest end visible, and it inflates no
+   radius: a body too small to resolve is drawn as the point of light it actually is. */
+      const KM_PER_AU = 149597870.7;
       const SIZE_EXP_BASE = 0.42; // built compression of radii
-      const SIZE_POWER_TRACK = 0.12; // how much of the spread the exponent follows
-      const SIZE_SPAN_TRACK = 0.3; // how far the ruler rises with the frame
+      const SIZE_POWER_TRACK = 0.12; // display half: how far the exponent follows
+      const SIZE_SPAN_TRACK = 0.3; // display half: how far the ruler rises with the frame
       const SIZE_FRAME_CAP = 0.9; // star radius as a fraction of the innermost orbit
-      const ROCK_SPAN_TRACK = 0.7; // faceted belt rocks ride the frame harder
-      const BELT_DOT_TRACK = 1; // the point layer is a pixel glyph: fully compensated
+      const ROCK_SPAN_TRACK = 0.7; // display half: belt rubble rides the frame harder
+      const TILT_EXAG_MAX = 12; // the strongest step the tilt button can ask for
+      const BELT_TILT_CAP = 4; // built cap on how far belt rocks may be fanned apart
       const INNER_AU = Math.min(...CATALOG.map((c) => c.au));
-      const sizeExp = () =>
+
+      /* how far the dial is into its true half: 0 at the built spread, 1 at a^1.00 */
+      const truthWeight = () =>
+        clamp(
+          (distPower - DIST_POWER_DEFAULT) /
+            (DIST_POWER_MAX - DIST_POWER_DEFAULT),
+          0,
+          1,
+        );
+
+      const dispExp = () =>
         SIZE_EXP_BASE + (distPower - DIST_POWER_DEFAULT) * SIZE_POWER_TRACK;
-      const sizeGain = () =>
+      const dispGain = () =>
         Math.min(
           Math.pow(spanGain(), SIZE_SPAN_TRACK),
           (SIZE_FRAME_CAP * auToUnit(INNER_AU)) / SUN_RADIUS,
         );
+      const trueExp = () => distPower; // the orbits' own exponent, applied to kilometres
+      const trueGain = () =>
+        (AU_GAIN / 1.25) * Math.pow(EARTH_RADIUS_KM / KM_PER_AU, distPower);
+
+      const sizeExp = () =>
+        (1 - truthWeight()) * dispExp() + truthWeight() * trueExp();
+      const sizeGain = () =>
+        Math.pow(dispGain(), 1 - truthWeight()) *
+        Math.pow(trueGain(), truthWeight());
       const kmToUnit = (km) =>
         1.25 * Math.pow(km / EARTH_RADIUS_KM, sizeExp()) * sizeGain();
-      /* asteroids use the planets' rule, plus their own legibility track */
+      /* the honest ruler on its own: what a^1.00 must agree with, exactly */
+      const trueUnit = (km) => AU_GAIN * Math.pow(km / KM_PER_AU, distPower);
+      /* asteroids carry a legibility bonus over the planets' rule; it fades with the dial,
+         so belt rubble is exactly its own radius once the system is to scale */
       const rockSize = (km) =>
-        kmToUnit(km) * ROCK_GAIN * Math.pow(spanGain(), ROCK_SPAN_TRACK);
+        kmToUnit(km) *
+        Math.pow(
+          ROCK_GAIN * Math.pow(spanGain(), ROCK_SPAN_TRACK),
+          1 - truthWeight(),
+        );
+      /* the star was built at 4.6 u instead of the ruler's own 8.67 u. That fix is a
+         display choice as well, and it is the last one to survive at a^1.00 */
+      const SUN_DISPLAY_FIX =
+        SUN_RADIUS /
+        (1.25 * Math.pow(SUN_RADIUS_KM / EARTH_RADIUS_KM, SIZE_EXP_BASE));
+      const sunUnit = () =>
+        kmToUnit(SUN_RADIUS_KM) * Math.pow(SUN_DISPLAY_FIX, 1 - truthWeight());
+
+      /* ------------------------------ unresolved bodies ------------------------------
+   A body whose disc subtends less than RESOLVE_PX pixels is not a disc, to an eye or to
+   a camera: it is a point source, and it is drawn as one — a point of fixed ANGULAR size
+   (the convention the starfield and the belt point layer already use) whose brightness
+   follows the light it really sends you. The geometry is never inflated: the disc stays
+   exactly to scale, and the point is what optics add.
+   The light a body sends you goes as albedo · area / distance from the Sun squared, so
+   its real relative brightness is geometric albedo × radiusKm² / au², compressed by an
+   exposure the way a camera compresses six orders of magnitude. */
+      const PSF_PX = 2.6; // angular radius of an unresolved body, in pixels
+      const RESOLVE_PX = 3.2; // above this many pixels across, a disc is a disc again
+      const EXPOSURE = 0.35; // camera-like compression of brightness
+      const ALBEDO = {
+        Mercury: 0.142,
+        Venus: 0.689,
+        Earth: 0.367,
+        Mars: 0.17,
+        Jupiter: 0.538,
+        Saturn: 0.499,
+        Uranus: 0.484,
+        Neptune: 0.415,
+        Ceres: 0.09,
+        Vesta: 0.424,
+        Pallas: 0.17,
+        Hygiea: 0.06,
+      };
+      const fluxOf = (name, radiusKm, au) =>
+        ((ALBEDO[name] || 0.2) * radiusKm * radiusKm) / (au * au);
+
+      /* A body too small to resolve is drawn as what it is to an eye or a camera: a point
+   of light of fixed ANGULAR size, the same convention the starfield and the belt point
+   layer already use. Nothing here inflates a radius — the disc geometry is left exactly
+   to scale and the point is what the optics add. */
+      const PSF_TEX = radialSprite(192, [
+        [0, "rgba(255,255,255,1)"],
+        [0.14, "rgba(255,255,255,0.78)"],
+        [0.3, "rgba(255,255,255,0.3)"],
+        [0.55, "rgba(255,255,255,0.08)"],
+        [0.8, "rgba(255,255,255,0.02)"],
+        [1, "rgba(255,255,255,0)"],
+      ]);
+      const makePsf = (hex) =>
+        new THREE.Sprite(
+          new THREE.SpriteMaterial({
+            map: PSF_TEX,
+            color: new THREE.Color(hex),
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            opacity: 0,
+          }),
+        );
+
+      /* Viewer exaggeration of orbital tilt, capped by the spread: a system drawn at its
+         true proportions has no room for a fanned-out belt, so the strongest the tilt
+         button can go falls from 12x at the built spread to 1x at a^1.00, and the belt's
+         own 4x fan cap falls with it. */
+      const TILT_STEPS = [1, 5, 12];
+      const tiltCap = () => 1 + (TILT_EXAG_MAX - 1) * (1 - truthWeight());
+      const beltTiltCap = () => 1 + (BELT_TILT_CAP - 1) * (1 - truthWeight());
+      const viewExag = () => Math.min(tiltScale, tiltCap());
+      const viewBeltExag = () => Math.min(viewExag(), beltTiltCap());
 
       const SUN_INFO = {
         key: "sun",
@@ -1653,6 +1779,11 @@
       glowOuter.scale.setScalar(SUN_RADIUS * 12.5);
       sunGroup.add(glowInner, glowOuter);
 
+      /* Seen from 54 AU the star is a star, not a disc: its point of light is fixed in
+         angle, not tied to the star's radius, and it hangs in the scene, not in sunGroup */
+      const sunPsf = makePsf(SUN_INFO.hex);
+      scene.add(sunPsf);
+
       /* prominences that swell and fade on the limb */
       const flareTex = radialSprite(256, [
         [0, "rgba(255,226,170,.75)"],
@@ -1694,6 +1825,10 @@
         labelEl: null,
         worldPos: new THREE.Vector3(0, 0, 0),
         isSun: true,
+        psf: sunPsf,
+        psfR: 0,
+        discPx: 0,
+        glow: 1,
       };
       const sunPick = new THREE.Mesh(
         new THREE.SphereGeometry(SUN_RADIUS * 1.25, 16, 12),
@@ -1769,7 +1904,8 @@
    Orientation of an orbit = Ry(Ω) · Rx(i) · Ry(ω), applied to the in-plane ellipse. */
       const deg2rad = THREE.MathUtils.degToRad;
       const UP = new THREE.Vector3(0, 1, 0);
-      let tiltScale = 1; // 1 = true inclinations; may be exaggerated for viewing
+      let tiltScale = 1; // 1 = true inclinations; may be exaggerated for viewing, capped by the spread
+
 
       /* point on the ellipse, then rotated by ω about the orbit normal */
       function orbitPoint(a, bMinor, e, E, cw, sw) {
@@ -1794,7 +1930,7 @@
         const orbitGroup = new THREE.Group();
         orbitGroup.rotation.order = "YXZ";
         orbitGroup.rotation.y = deg2rad(def.node);
-        orbitGroup.rotation.x = incRad * tiltScale;
+        orbitGroup.rotation.x = incRad * viewExag();
         scene.add(orbitGroup);
 
         const pts = [];
@@ -1904,9 +2040,14 @@
         /* a hit target has its own floor, so it rescales by that law, not blindly */
         const pickBase = Math.max(2.1, r * 1.9);
 
+        /* its point of light rides the pivot, outside the size-scaled disc group, so the
+           geometry stays to scale and only the optics are added */
+        const psf = makePsf(def.hex);
+        pivot.add(psf);
+
         const labelEl = document.createElement("div");
         labelEl.className = "label";
-        labelEl.innerHTML = `<i style="background:${def.hex};color:${def.hex}"></i>${def.name}`;
+        labelEl.innerHTML = `<i style="color:${def.hex}"></i>${def.name}`;
         labelHost.appendChild(labelEl);
 
         const body = {
@@ -1926,6 +2067,10 @@
           mesh,
           line,
           pick,
+          psf,
+          psfR: 0,
+          discPx: 0,
+          flux: fluxOf(def.name, def.radiusKm, def.au),
           labelEl,
           moon,
           moonPivot,
@@ -1947,7 +2092,7 @@
 
       const sunLabel = document.createElement("div");
       sunLabel.className = "label";
-      sunLabel.innerHTML = `<i style="background:#ffb454;color:#ffb454"></i>Sun`;
+      sunLabel.innerHTML = `<i style="color:#ffb454"></i>Sun`;
       sunLabel.style.opacity = "0";
       labelHost.appendChild(sunLabel);
       sunBody.labelEl = sunLabel;
@@ -2494,7 +2639,7 @@
         beltDrawnTotal = 0;
 
       function updateBelt(days) {
-        const k = Math.min(tiltScale, 4);
+        const k = viewBeltExag();
         if (k !== beltTiltK) {
           beltTiltK = k;
           for (const m of beltMeta) {
@@ -2507,11 +2652,11 @@
         const pxPerUnit =
           (renderer.domElement.height * 0.5) /
           Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5);
-        /* the point layer is a legibility glyph rather than a body: at a¹ the camera it
-           draws under is 4.6× further back, so the glyph rises with the frame the spread
-           forces instead of thinning the belt into a hairline */
-        beltMat.uniforms.uScale.value =
-          renderer.domElement.height * 0.5 * Math.pow(spanGain(), BELT_DOT_TRACK);
+        /* the point layer is perspective-correct: a grain is drawn at the size its own
+           radius and its distance from the camera imply. The shader's 1 px floor is not a
+           fudge, it is what an unresolved speck of reality looks like — and at a^1.00 it is
+           the only thing the belt has left, which is exactly what a belt is. */
+        beltMat.uniforms.uScale.value = renderer.domElement.height * 0.5;
         const cx = camera.position.x,
           cy = camera.position.y,
           cz = camera.position.z;
@@ -2852,7 +2997,7 @@
       function makeLabel(name, hex) {
         const el = document.createElement("div");
         el.className = "label";
-        el.innerHTML = `<i style="background:${hex};color:${hex}"></i>${name}`;
+        el.innerHTML = `<i style="color:${hex}"></i>${name}`;
         labelHost.appendChild(el);
         return el;
       }
@@ -2866,7 +3011,7 @@
         const orbitGroup = new THREE.Group();
         orbitGroup.rotation.order = "YXZ";
         orbitGroup.rotation.y = deg2rad(def.node);
-        orbitGroup.rotation.x = incRad * tiltScale;
+        orbitGroup.rotation.x = incRad * viewExag();
         scene.add(orbitGroup);
 
         const a = auToUnit(def.au),
@@ -2914,6 +3059,8 @@
         );
         pivot.add(pick);
         const pickBase = Math.max(1.8, rU * 2.6);
+        const psf = makePsf(def.hex);
+        pivot.add(psf);
 
         const lbl = makeLabel(def.name, def.hex);
         const body = {
@@ -2931,6 +3078,10 @@
           mesh,
           line,
           pick,
+          psf,
+          psfR: 0,
+          discPx: 0,
+          flux: fluxOf(def.name, def.radiusKm, def.au),
           labelEl: lbl,
           incRad,
           cw,
@@ -2949,11 +3100,23 @@
 
       const rocks = ROCKS.map(buildRock);
 
+      /* What each body really sends you: geometric albedo × area / distance from the Sun
+   squared, compressed by a camera-like exposure so six orders of magnitude fit on screen
+   and the ordering the eye knows (Jupiter bright, Neptune faint, rubble barely there)
+   survives. The star is the light source: its point is at full exposure. */
+      const glowMax = Math.max(...bodies.filter((b) => !b.isSun).map((b) => b.flux));
+      for (const b of bodies)
+        b.glow = b.isSun
+          ? 1
+          : clamp(Math.pow(b.flux / glowMax, EXPOSURE), 0.14, 1);
+
       /* --------------------- camera: drag to orbit, scroll to zoom ------------- */
-      /* How close you may come. Locked to the target: an asteroid is a fraction of a
-   unit across, so following one lets you in far nearer than following Jupiter. */
-      const BASE_MIN_DIST = 9;
-      let MIN_DIST = BASE_MIN_DIST;
+      /* How close you may come. Locked to the size ruler, not to a constant: a to-scale
+   world at a^1.00 is a thousandth of a unit across, and a 9-unit floor would keep every
+   one of them forever unresolvable. 9 units is what the floor is on the BUILT ruler
+   (Earth's radius there is 1.25 u), and it scales with the ruler from there. */
+      const baseMinDist = () => 9 * (kmToUnit(EARTH_RADIUS_KM) / 1.25);
+      let MIN_DIST = baseMinDist();
       const MAX_DIST = 1100;
       const cam = { az: 2.35, pol: 1.06, dist: 210, tx: 0, ty: 0, tz: 0 };
       const camSmooth = {
@@ -3197,10 +3360,14 @@
 
       function startFollowing(body) {
         following = body;
-        MIN_DIST = Math.max(2.0, body.r * 3.2);
+        /* Riding is a ratio, not a distance: the camera parks at a fixed multiple of the
+           body's own radius, so a world drawn to scale at a^1.00 frames exactly like an
+           inflated one at a^0.55, and the floor you cannot zoom past follows the same
+           ratio instead of a constant that a to-scale body would already be inside. */
+        MIN_DIST = Math.max(body.r * 3.2, 1e-3);
         cam.dist = clamp(
-          body.isSun ? body.r * 16 : body.r * 9 + 4,
-          MIN_DIST + 2,
+          body.isSun ? body.r * 16 : body.r * 9,
+          MIN_DIST * 1.2,
           MAX_DIST,
         );
         followBtn.textContent = "Following ✓";
@@ -3208,7 +3375,7 @@
       }
       function stopFollowing() {
         following = null;
-        MIN_DIST = BASE_MIN_DIST;
+        MIN_DIST = baseMinDist();
         followBtn.textContent = "Follow orbit";
         updateChips();
       }
@@ -3283,23 +3450,36 @@
       paintSpeed();
 
       /* Inclination viewer. ×1 is the truth — real inclinations are only 0–7°, so they read
-   as a flat sheet; the higher steps fan the planes apart without changing any dynamics. */
-      const TILT_STEPS = [1, 5, 12];
+   as a flat sheet; the higher steps fan the planes apart without changing any dynamics.
+   How far the button may fan them is capped by the distance spread: at a^1.00 the system
+   is drawn to scale and a fanned-out belt would be a lie, so the cap falls to 1× there. */
       let tiltStep = 0;
+      const fmtExag = (v) =>
+        Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : v.toFixed(1);
       function applyTiltScale() {
         for (const b of bodies)
-          if (b.orbitGroup) b.orbitGroup.rotation.x = b.incRad * tiltScale;
+          if (b.orbitGroup) b.orbitGroup.rotation.x = b.incRad * viewExag();
+      }
+      function paintTilt() {
+        const used = viewExag();
+        btnTilt.textContent =
+          tiltScale === 1
+            ? "Tilt ×1"
+            : used < tiltScale - 1e-9
+              ? `Tilt ×${tiltScale} → ×${fmtExag(used)}`
+              : `Tilt ×${tiltScale}`;
+        btnTilt.classList.toggle("on", used !== 1);
+        btnTilt.title =
+          tiltScale === 1
+            ? "Inclinations at their true values"
+            : used < tiltScale - 1e-9
+              ? `Asked for ${tiltScale}×, but the spread caps the fan-out at ${fmtExag(tiltCap())}× — at a^1.00 inclinations are true`
+              : `Inclinations exaggerated ${tiltScale}× for viewing`;
       }
       btnTilt.addEventListener("click", () => {
         tiltStep = (tiltStep + 1) % TILT_STEPS.length;
         tiltScale = TILT_STEPS[tiltStep];
-        btnTilt.textContent =
-          tiltScale === 1 ? "Tilt ×1" : `Tilt ×${tiltScale}`;
-        btnTilt.classList.toggle("on", tiltScale !== 1);
-        btnTilt.title =
-          tiltScale === 1
-            ? "Inclinations at their true values"
-            : `Inclinations exaggerated ${tiltScale}× for viewing`;
+        paintTilt();
         applyTiltScale();
         if (tiltScale !== 1 && !eclipticGrid.visible) {
           eclipticGrid.visible = true;
@@ -3348,16 +3528,22 @@
 
       /* One note for both compression settings: it has to describe what is on screen now. */
       function paintScaleNote() {
+        const w = truthWeight();
+        const trueRuler = (v) =>
+          Math.abs(v) >= 1e-3 ? v.toFixed(2) : v.toExponential(2);
         const spread =
           distPower >= DIST_POWER_MAX
-            ? "orbit radii at true proportional spacing (a¹)"
+            ? "orbits AND radii at true proportional scale (a¹)"
             : `orbit radii compressed as a^${distPower.toFixed(2)}`;
+        const used = viewExag();
         const tilt =
-          tiltScale === 1
+          used === 1
             ? "inclinations true"
-            : `inclinations exaggerated ${tiltScale}× so each tilted plane reads against the ecliptic grid · true values are 0–7°` +
-              (tiltScale > 4 ? " · belt rocks capped at 4×" : "");
-        scaleNoteEl.textContent = `radii compressed for visibility · ${spread} · body sizes follow the spread (km^${sizeExp().toFixed(2)}, ruler ${sizeGain().toFixed(2)}×) · Earth's orbit pinned at 18 u · ${tilt} · orbits solved from real J2000 elements (a, e, i, Ω, ω, M₀)`;
+            : `inclinations exaggerated ${fmtExag(used)}× so each tilted plane reads against the ecliptic grid · true values are 0–7°` +
+              (viewBeltExag() < used - 1e-9
+                ? ` · belt rocks capped at ${fmtExag(viewBeltExag())}×`
+                : "");
+        scaleNoteEl.textContent = `${w === 1 ? "everything to scale" : "radii compressed for visibility"} · ${spread} · size ruler km^${sizeExp().toFixed(2)} at ${trueRuler(sizeGain())}× · ${w > 0.001 ? `${Math.round(w * 100)}% of the way from the display ruler to the true one · ` : ""}discs under ${RESOLVE_PX}px are drawn as point sources · Earth's orbit pinned at 18 u · ${tilt} · orbits solved from real J2000 elements (a, e, i, Ω, ω, M₀)`;
       }
 
       /* Sizes ride the spread. Each body's geometry is built once, at the built radius,
@@ -3369,7 +3555,7 @@
         if (b.isSun) {
           /* the star's limb shell, glows, prominences and pick are all children of
              sunGroup, so one group scale moves the whole display of the star */
-          const g = sizeGain();
+          const g = sunUnit() / SUN_RADIUS;
           sunGroup.scale.setScalar(g);
           b.r = SUN_RADIUS * g;
           return;
@@ -3401,6 +3587,9 @@
           if (!b.isSun) {
             b.a = auToUnit(b.def.au);
             repaintOrbit(b);
+            /* the spread caps how far an orbit plane may be fanned out, so it has to
+               re-apply the tilt as well as re-solving the ellipse */
+            b.orbitGroup.rotation.x = b.incRad * viewExag();
           }
           applySize(b);
         }
@@ -3420,17 +3609,18 @@
         const ratio = spanGain();
         if (following) {
           const f = following.r / rideBefore;
-          cam.dist = clamp(cam.dist * f, MIN_DIST + 2, MAX_DIST);
+          cam.dist = clamp(cam.dist * f, MIN_DIST * 1.2, MAX_DIST);
           camSmooth.dist = clamp(camSmooth.dist * f, MIN_DIST, MAX_DIST);
-          MIN_DIST = Math.max(2.0, following.r * 3.2);
+          MIN_DIST = Math.max(following.r * 3.2, 1e-3);
         } else {
           const step = ratio / spanRatio;
-          cam.dist = clamp(cam.dist * step, MIN_DIST + 2, MAX_DIST);
+          cam.dist = clamp(cam.dist * step, MIN_DIST * 1.2, MAX_DIST);
           camSmooth.dist = clamp(camSmooth.dist * step, MIN_DIST, MAX_DIST);
           camSmooth.target.multiplyScalar(step);
         }
         spanRatio = ratio;
         paintSpread();
+        paintTilt();
         paintScaleNote();
       }
 
@@ -3593,6 +3783,16 @@
           camSmooth.target.z + camSmooth.dist * sp * Math.sin(camSmooth.az),
         );
         camera.lookAt(camSmooth.target);
+
+        /* Standing on a world that is a thousandth of a unit across means the near
+           clipping plane has to come in with you, or the world you are riding is clipped
+           away. It never moves further out than the built 0.1, so nothing that worked
+           before changes. */
+        const near = clamp(camSmooth.dist * 0.01, 1e-4, 0.1);
+        if (Math.abs(near - camera.near) > 1e-12) {
+          camera.near = near;
+          camera.updateProjectionMatrix();
+        }
       }
 
       function updateSun(t, dt) {
@@ -3616,7 +3816,7 @@
         const target = hovered || selected;
         if (target) {
           hoverRing.position.copy(target.worldPos);
-          const s = Math.max(target.r * 3.1, 3.6);
+          const s = Math.max(target.r * 3.1, target.psfR * 2.4);
           hoverRing.scale.setScalar(damp(hoverRing.scale.x, s, 12, dt));
           hoverRing.material.color.set(target.info.hex);
           hoverRing.material.opacity = damp(
@@ -3645,9 +3845,94 @@
         }
       }
 
+      const pxPerUnitNow = () =>
+        (renderer.domElement.height * 0.5) /
+        Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5);
+
+      /* ---------------------------- unresolved bodies ----------------------------
+   A disc under RESOLVE_PX pixels across is not a disc to anyone: it is a point source.
+   The disc is left exactly to scale and a PSF of fixed angular size is added, fading out
+   as the disc resolves. psfR is that point's radius in scene units at the current camera
+   distance — the number labels, pick targets and the highlight ring actually work from.
+   psfCount is how many bodies are currently points, which is the honest measure of how
+   much of the system this zoom can resolve. */
+      let psfCount = 0;
+      function updatePoints() {
+        const ppu = pxPerUnitNow();
+        let unresolved = 0;
+        for (const b of bodies) {
+          const dist = camera.position.distanceTo(b.worldPos);
+          const discPx = (b.r * ppu) / Math.max(1e-6, dist);
+          b.discPx = discPx;
+          b.psfR = (PSF_PX * dist) / ppu;
+          const fade = clamp((RESOLVE_PX - discPx) / (RESOLVE_PX * 0.65), 0, 1);
+          b.psf.visible = fade > 0.004;
+          b.psf.scale.setScalar(2 * b.psfR);
+          b.psf.material.opacity = b.glow * fade;
+          if (b.psf.visible) unresolved++;
+          if (b.pick)
+            b.pick.scale.setScalar(
+              Math.max(pickLaw(b, b.r), 1.8 * b.psfR) / b.pickBase,
+            );
+        }
+        psfCount = unresolved;
+      }
+
       const labelCandidates = [];
       const labelBoxes = [];
       const COMPACT_FROM = 190;
+      /* reticle sizes and the shortest leader worth drawing */
+      const MARK_D = 13;
+      const MARK_D_ROCK = 10;
+      const LEAD_MIN = 5;
+
+      /* every body that can be tagged also gets a reticle (its position) and a hairline
+         from the tag to that reticle, both in the body's own colour */
+      function ensureMark(b) {
+        if (b.markEl) return b;
+        const hex = (b.info && b.info.hex) || (b.def && b.def.hex) || "#ffffff";
+        b.markEl = document.createElement("div");
+        b.markEl.className = "mark";
+        b.markEl.style.borderColor = hex;
+        b.leadEl = document.createElement("div");
+        b.leadEl.className = "lead";
+        b.leadEl.style.borderColor = hex;
+        labelHost.append(b.markEl, b.leadEl);
+        return b;
+      }
+
+      function hideMark(b) {
+        if (b.markEl) b.markEl.style.opacity = "0";
+        if (b.leadEl) b.leadEl.style.opacity = "0";
+      }
+
+      /* the end of the leader is the nearest edge of the tag, so the line always leaves the
+         tag it belongs to instead of crossing over another one; (x,y) is the tag's centre and
+         (hw,hh) are the tag's REAL half sizes — the box used to avoid collisions is padded */
+      function drawMark(b, sx, sy, x, y, hw, hh, rank) {
+        const m = ensureMark(b);
+        const bx = clamp(sx, x - hw - 1, x + hw + 1);
+        const by = clamp(sy, y - hh - 1, y + hh + 1);
+        const dx = sx - bx,
+          dy = sy - by;
+        const run = Math.hypot(dx, dy);
+        if (run > LEAD_MIN) {
+          m.leadEl.style.width = run.toFixed(1) + "px";
+          m.leadEl.style.transform =
+            `translate3d(${bx.toFixed(1)}px, ${by.toFixed(1)}px, 0) rotate(${Math.atan2(dy, dx).toFixed(3)}rad)`;
+          m.leadEl.style.opacity = rank ? "0.72" : "0.4";
+        } else m.leadEl.style.opacity = "0";
+        /* only while the body is still a point of light: once you can see the disc, the line
+           is enough and a ring around a world you can look at is just noise */
+        if ((b.discPx || 0) < RESOLVE_PX) {
+          const d = b.isRock ? MARK_D_ROCK : MARK_D;
+          m.markEl.style.width = d + "px";
+          m.markEl.style.height = d + "px";
+          m.markEl.style.transform = `translate3d(${(sx - d / 2).toFixed(1)}px, ${(sy - d / 2).toFixed(1)}px, 0)`;
+          m.markEl.style.opacity = rank ? "0.85" : "0.55";
+        } else m.markEl.style.opacity = "0";
+      }
+
 
       function updateLabels() {
         const w = window.innerWidth,
@@ -3661,10 +3946,14 @@
           const el = b.labelEl;
           if (!showLabels) {
             el.style.opacity = "0";
+            hideMark(b);
             continue;
           }
           const dist = camera.position.distanceTo(b.worldPos);
-          const screenR = (b.r * pxPerUnit) / Math.max(1, dist);
+          /* an unresolved body still has a size on screen: its point. Labels hang off
+             what you can actually see, not off a radius that is below a pixel. */
+          const screenR =
+            (Math.max(b.r, b.psfR) * pxPerUnit) / Math.max(1e-3, dist);
           tmpV.copy(b.worldPos).project(camera);
           if (
             tmpV.z > 1 ||
@@ -3672,6 +3961,7 @@
             Math.abs(tmpV.y) > 1.02
           ) {
             el.style.opacity = "0";
+            hideMark(b);
             continue;
           }
 
@@ -3690,6 +3980,10 @@
           }
           const lw = (compact ? b._lwC : b._lw) + 6;
           const lh = (compact ? b._lhC : b._lh) + 5;
+          /* the collision box is padded so tags keep their distance; a leader has to start at
+             the pill you can actually see, so it uses the measured size instead */
+          const trueW = compact ? b._lwC : b._lw;
+          const trueH = compact ? b._lhC : b._lh;
 
           const sx = (tmpV.x * 0.5 + 0.5) * w;
           const sy = (-tmpV.y * 0.5 + 0.5) * h;
@@ -3730,6 +4024,10 @@
             spots,
             hw,
             hh,
+            sx,
+            sy,
+            tw: trueW * 0.5,
+            th: trueH * 0.5,
             rank,
             fade,
             prio: rank * 1e9 + screenR * 1000 + (b.isSun ? 500 : 0),
@@ -3759,11 +4057,13 @@
           }
           if (!placed) {
             c.el.style.opacity = "0";
+            hideMark(c.b);
             continue;
           }
           labelBoxes.push({ cx: placed.cx, cy: placed.cy, hw: c.hw, hh: c.hh });
           c.el.style.transform = `translate3d(${placed.cx.toFixed(1)}px, ${placed.cy.toFixed(1)}px, 0) translate(-50%,-50%)`;
           c.el.style.opacity = (c.fade * (c.rank ? 1 : 0.88)).toFixed(2);
+          drawMark(c.b, c.sx, c.sy, placed.cx, placed.cy, c.tw, c.th, c.rank);
         }
       }
 
@@ -3786,6 +4086,7 @@
         updateSun(t, dt);
         updateBelt(days);
         updateCamera(dt);
+        updatePoints();
         updateHighlight(dt);
 
         starGroup.position.copy(camera.position);
@@ -3804,6 +4105,7 @@
       updateBodies();
       updateBelt(days);
       updateCamera(0.016);
+      updatePoints();
       renderer.render(scene, camera);
       bootEl.classList.add("done");
       setTimeout(() => bootEl.remove(), 700);
